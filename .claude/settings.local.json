@@ -10,7 +10,8 @@
       "Bash(psql \"postgres://postgres:reG-_24Iv2%23@localhost:5432/apex\")",
       "Bash(\"C:\\\\Program Files\\\\PostgreSQL\\\\18\\\\bin\\\\psql\" \"postgres://postgres:reG-_24Iv2%23@localhost:5432/apex\")",
       "Bash(git add *)",
-      "Bash(git commit -m 'Complete test coverage for all modules + fix pool transaction atomicity *)"
+      "Bash(git commit -m 'Complete test coverage for all modules + fix pool transaction atomicity *)",
+      "Bash(git commit -m 'Add power-ups, cosmetics, commitment contracts, and token wheel *)"
     ]
   }
 }

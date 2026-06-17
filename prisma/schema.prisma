@@ -53,6 +53,10 @@ model User {
   poolParticipants     PoolParticipant[]
   poolsCreated         Pool[]            @relation("PoolCreator")
   paymentAccounts      PaymentAccount[]
+  powerUps             PowerUp[]
+  userCosmetics        UserCosmetic[]
+  commitmentContracts  CommitmentContract[]
+  wheelSpins           WheelSpin[]
 }
 
 model Session {
@@ -307,4 +311,125 @@ enum BrainTier {
   FOG         // Tier 2: approaching limits
   SLIME       // Tier 3: exceeding limits
   GRAY_VOID   // Tier 4: prolonged failure
+}
+
+// ─── Power-Ups ────────────────────────────────────────────────────────────────
+
+model PowerUp {
+  id          String       @id @default(uuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        PowerUpType
+  quantity    Int          @default(1)
+  activatedAt DateTime?    // when the power-up was activated (null = inactive)
+  expiresAt   DateTime?    // when the power-up effect ends
+  targetPoolId String?     // for Bounty: which pool it's targeting
+  targetUserId String?     // for Bounty: which user has the bounty
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([userId, type])
+  @@index([userId, activatedAt])
+}
+
+enum PowerUpType {
+  BOUNTY          // Steal tokens from a party member who fails their target
+  BS              // View your bounty status
+  BS_PLUS         // View bounty status + exact decrease needed to win
+  DOUBLE_DOWN     // 2x point multiplier, but 2x brain rot speed
+  SLIME_SHIELD    // 3-hour protection from slime damage
+  INHALE_ASSIST   // Shorten next breathing gate by 5s per phase
+}
+
+// ─── Cortex Vault / Cosmetics ─────────────────────────────────────────────────
+
+model CosmeticItem {
+  id          String       @id @default(uuid())
+  name        String       @unique
+  description String?
+  type        CosmeticType
+  rarity      CosmeticRarity @default(COMMON)
+  price       Int          @default(0) // in tokens, 0 = wheel-exclusive
+  assetUrl    String?      // URL to the cosmetic asset/image
+  seasonalTag String?      // e.g., "halloween-2025", "winter-2026"
+  createdAt   DateTime     @default(now())
+
+  userCosmetics UserCosmetic[]
+}
+
+enum CosmeticType {
+  HAT
+  GLASSES
+  HEADPHONES
+  COFFEE_CUP
+  BACKGROUND
+  SKIN
+  ACCESSORY
+}
+
+enum CosmeticRarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
+  SEASONAL
+}
+
+model UserCosmetic {
+  id          String       @id @default(uuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cosmeticId  String
+  cosmetic    CosmeticItem @relation(fields: [cosmeticId], references: [id], onDelete: Cascade)
+  equipped    Boolean      @default(false)
+  acquiredAt  DateTime     @default(now())
+
+  @@unique([userId, cosmeticId])
+  @@index([userId, equipped])
+}
+
+// ─── Commitment Contracts ─────────────────────────────────────────────────────
+
+model CommitmentContract {
+  id              String        @id @default(uuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  pledgeAmount    Int           // in cents (real money)
+  stripePaymentId String?       @unique // Stripe PaymentIntent ID
+  status          ContractStatus @default(ACTIVE)
+  targetScreenTime Int          // daily target in seconds
+  startDate       DateTime
+  endDate         DateTime
+  charityName     String?       // where forfeited money goes
+  charityStripeId String?       // Stripe Connect account for charity
+  completedAt     DateTime?
+  forfeitedAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([userId, status])
+}
+
+enum ContractStatus {
+  ACTIVE
+  COMPLETED
+  FORFEITED
+  CANCELLED
+}
+
+// ─── Token Wheel (Gacha) ─────────────────────────────────────────────────────
+
+model WheelSpin {
+  id          String       @id @default(uuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cost        Int          @default(10) // tokens spent
+  rewardType   String      // 'credits', 'power_up', 'cosmetic'
+  rewardId    String?      // power_up_id or cosmetic_id
+  rewardAmount Int         @default(15) // credits earned (minimum 15)
+  createdAt   DateTime     @default(now())
+
+  @@index([userId, createdAt])
 }

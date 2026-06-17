@@ -11,6 +11,7 @@ import friendsRouter from './modules/friends/friends.routes.js';
 import paymentsRouter from './modules/payments/payments.routes.js';
 import { webhookHandler } from './modules/payments/payments.routes.js';
 import screentimeRouter from './modules/screentime/screentime.routes.js';
+import powerupsRouter from './modules/powerups/powerups.routes.js';
 
 const app = express();
 
@@ -47,6 +48,7 @@ app.use('/api/users', usersRouter);
 app.use('/api/friends', friendsRouter);
 app.use('/api', paymentsRouter); // /api/tokens/*, /api/pools/*, /api/payments/*
 app.use('/api/screentime', screentimeRouter);
+app.use('/api', powerupsRouter); // /api/wheel/*, /api/power-ups/*, /api/cosmetics/*, /api/commitments/*
 
 // ─── 404 Handler ───────────────────────────────────────────────────────────
 
