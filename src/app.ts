@@ -9,9 +9,18 @@ import authRouter from './modules/auth/auth.routes.js';
 import usersRouter from './modules/users/users.routes.js';
 import friendsRouter from './modules/friends/friends.routes.js';
 import paymentsRouter from './modules/payments/payments.routes.js';
+import { webhookHandler } from './modules/payments/payments.routes.js';
 import screentimeRouter from './modules/screentime/screentime.routes.js';
 
 const app = express();
+
+// ─── Stripe webhook (must be BEFORE express.json() for raw body) ─────────────
+
+app.post(
+  '/api/payments/webhook',
+  express.raw({ type: 'application/json' }),
+  webhookHandler
+);
 
 // ─── Global Middleware ──────────────────────────────────────────────────────
 
@@ -36,7 +45,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/friends', friendsRouter);
-app.use('/api', paymentsRouter); // /api/tokens/* and /api/pools/*
+app.use('/api', paymentsRouter); // /api/tokens/*, /api/pools/*, /api/payments/*
 app.use('/api/screentime', screentimeRouter);
 
 // ─── 404 Handler ───────────────────────────────────────────────────────────

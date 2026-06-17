@@ -3,7 +3,10 @@
     "allow": [
       "PowerShell(node -v)",
       "PowerShell(Get-Command node -ErrorAction SilentlyContinue)",
-      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npm install 2>&1)"
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npm install 2>&1)",
+      "Bash(npx tsc *)",
+      "Bash(npx prisma *)",
+      "Bash(npx vitest *)"
     ]
   }
 }
