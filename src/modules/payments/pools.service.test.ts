@@ -12,20 +12,24 @@ describe('pools.service', () => {
         email: `pool-creator-${Date.now()}@test.app`,
         username: `pool-creator-${Date.now()}`,
         passwordHash: 'fake',
-        tokenWallet: { create: { balance: 1000 } },
       },
     });
     creatorId = creator.id;
+    await prisma.tokenWallet.create({
+      data: { userId: creatorId, balance: 1000 },
+    });
 
     const joiner = await prisma.user.create({
       data: {
         email: `pool-joiner-${Date.now()}@test.app`,
         username: `pool-joiner-${Date.now()}`,
         passwordHash: 'fake',
-        tokenWallet: { create: { balance: 1000 } },
       },
     });
     joinerId = joiner.id;
+    await prisma.tokenWallet.create({
+      data: { userId: joinerId, balance: 1000 },
+    });
   });
 
   afterAll(async () => {
@@ -86,10 +90,12 @@ describe('pools.service', () => {
           email: `joiner-${Date.now()}-${Math.random().toString(36).slice(2)}@test.app`,
           username: `joiner-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           passwordHash: 'fake',
-          tokenWallet: { create: { balance: 1000 } },
         },
       });
       currentJoinerId = joiner.id;
+      await prisma.tokenWallet.create({
+        data: { userId: currentJoinerId, balance: 1000 },
+      });
 
       const endsAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
       const pool = await createPool(creatorId, 'Join Test', undefined, 50, 10, endsAt);
@@ -134,9 +140,9 @@ describe('pools.service', () => {
           email: `third-${Date.now()}@test.app`,
           username: `third-${Date.now()}`,
           passwordHash: 'fake',
-          tokenWallet: { create: { balance: 500 } },
         },
       });
+      await prisma.tokenWallet.create({ data: { userId: third.id, balance: 500 } });
       await expect(joinPool(smallPool.id, third.id)).rejects.toThrow('Pool is full');
 
       await prisma.user.delete({ where: { id: third.id } }).catch(() => {});
@@ -153,10 +159,12 @@ describe('pools.service', () => {
           email: `leaver-${Date.now()}-${Math.random().toString(36).slice(2)}@test.app`,
           username: `leaver-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           passwordHash: 'fake',
-          tokenWallet: { create: { balance: 1000 } },
         },
       });
       leaverId = leaver.id;
+      await prisma.tokenWallet.create({
+        data: { userId: leaverId, balance: 1000 },
+      });
 
       const endsAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
       const pool = await createPool(creatorId, 'Leave Test', undefined, 50, 10, endsAt);
@@ -186,7 +194,6 @@ describe('pools.service', () => {
           email: `other-${Date.now()}@test.app`,
           username: `other-${Date.now()}`,
           passwordHash: 'fake',
-          tokenWallet: { create: { balance: 100 } },
         },
       });
       await expect(leavePool(poolId, other.id)).rejects.toThrow('not a participant');
@@ -201,9 +208,9 @@ describe('pools.service', () => {
           email: `winner-${Date.now()}@test.app`,
           username: `winner-${Date.now()}`,
           passwordHash: 'fake',
-          tokenWallet: { create: { balance: 1000 } },
         },
       });
+      await prisma.tokenWallet.create({ data: { userId: winner.id, balance: 1000 } });
 
       const endsAt = new Date(Date.now() - 1000); // already ended
       const pool = await createPool(creatorId, 'Settle Test', undefined, 100, 10, endsAt);
@@ -237,7 +244,6 @@ describe('pools.service', () => {
           email: `other-winner-${Date.now()}@test.app`,
           username: `other-winner-${Date.now()}`,
           passwordHash: 'fake',
-          tokenWallet: { create: { balance: 100 } },
         },
       });
 
@@ -251,9 +257,9 @@ describe('pools.service', () => {
           email: `ledger-winner-${Date.now()}@test.app`,
           username: `ledger-winner-${Date.now()}`,
           passwordHash: 'fake',
-          tokenWallet: { create: { balance: 1000 } },
         },
       });
+      await prisma.tokenWallet.create({ data: { userId: ledgerWinner.id, balance: 1000 } });
 
       const endsAt = new Date(Date.now() - 1000);
       const pool = await createPool(creatorId, 'Ledger Settle', undefined, 100, 10, endsAt);

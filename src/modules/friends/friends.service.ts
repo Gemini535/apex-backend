@@ -61,6 +61,18 @@ export async function sendFriendRequest(
     throw new AppError('A pending friend request already exists', 409);
   }
 
+  // Delete any declined/accepted requests between these users so the unique
+  // constraint on (senderId, receiverId) doesn't block a new request.
+  await prisma.friendRequest.deleteMany({
+    where: {
+      OR: [
+        { senderId: senderId, receiverId: targetUser.id },
+        { senderId: targetUser.id, receiverId: senderId },
+      ],
+      status: { not: 'PENDING' },
+    },
+  });
+
   const request = await prisma.friendRequest.create({
     data: {
       senderId: senderId,

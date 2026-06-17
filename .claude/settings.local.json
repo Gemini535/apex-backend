@@ -6,7 +6,11 @@
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npm install 2>&1)",
       "Bash(npx tsc *)",
       "Bash(npx prisma *)",
-      "Bash(npx vitest *)"
+      "Bash(npx vitest *)",
+      "Bash(psql \"postgres://postgres:reG-_24Iv2%23@localhost:5432/apex\")",
+      "Bash(\"C:\\\\Program Files\\\\PostgreSQL\\\\18\\\\bin\\\\psql\" \"postgres://postgres:reG-_24Iv2%23@localhost:5432/apex\")",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Complete test coverage for all modules + fix pool transaction atomicity *)"
     ]
   }
 }

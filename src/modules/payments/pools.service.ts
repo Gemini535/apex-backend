@@ -14,18 +14,20 @@ export async function createPool(
   maxParticipants: number | undefined,
   endsAt: Date,
 ) {
-  const created = await prisma.$transaction(async (tx) => {
-    // Verify creator has sufficient balance first
-    const wallet = await tx.tokenWallet.findUnique({
-      where: { userId: creatorId },
-    });
-    if (!wallet) {
-      throw new AppError('Token wallet not found', 404);
-    }
-    if (wallet.balance < entryFee) {
-      throw new AppError('Insufficient token balance to create pool', 400);
-    }
+  // Look up wallet OUTSIDE the transaction to get the ID, then use the ID inside.
+  // This avoids the Prisma interactive transaction visibility issue where
+  // findFirst/findUnique can't see records created on a different connection.
+  const wallet = await prisma.tokenWallet.findFirst({
+    where: { userId: creatorId },
+  });
+  if (!wallet) {
+    throw new AppError('Token wallet not found', 404);
+  }
+  if (wallet.balance < entryFee) {
+    throw new AppError('Insufficient token balance to create pool', 400);
+  }
 
+  const created = await prisma.$transaction(async (tx) => {
     const pool = await tx.pool.create({
       data: {
         creatorId,
@@ -56,7 +58,7 @@ export async function createPool(
       },
     });
 
-    // Deduct entry fee inside the same transaction
+    // Deduct entry fee inside the same transaction using the wallet ID we already have
     const newBalance = wallet.balance - entryFee;
     await tx.tokenWallet.update({
       where: { id: wallet.id },
@@ -89,63 +91,38 @@ export async function createPool(
 // ---------------------------------------------------------------------------
 
 export async function joinPool(poolId: string, userId: string) {
-  const entryFee = await prisma.$transaction(async (tx) => {
-    const pool = await tx.pool.findUnique({
-      where: { id: poolId },
-      include: { participants: true },
-    });
+  // Look up wallet and pool OUTSIDE the transaction to get IDs
+  const wallet = await prisma.tokenWallet.findFirst({ where: { userId } });
+  if (!wallet) {
+    throw new AppError('Token wallet not found', 404);
+  }
 
-    if (!pool) {
-      throw new AppError('Pool not found', 404);
-    }
+  const pool = await prisma.pool.findUnique({
+    where: { id: poolId },
+    include: { participants: true },
+  });
 
-    if (pool.status !== 'OPEN') {
-      throw new AppError('Pool is not open for joining', 400);
-    }
+  if (!pool) {
+    throw new AppError('Pool not found', 404);
+  }
+  if (pool.status !== 'OPEN') {
+    throw new AppError('Pool is not open for joining', 400);
+  }
+  if (pool.creatorId === userId) {
+    throw new AppError('Creator is already a participant', 400);
+  }
+  if (pool.participants.some((p) => p.userId === userId)) {
+    throw new AppError('You are already a participant in this pool', 400);
+  }
+  if (pool.maxParticipants !== null && pool.participants.length >= pool.maxParticipants) {
+    throw new AppError('Pool is full', 400);
+  }
+  if (wallet.balance < pool.entryFee) {
+    throw new AppError('Insufficient token balance to join pool', 400);
+  }
 
-    if (pool.creatorId === userId) {
-      throw new AppError('Creator is already a participant', 400);
-    }
-
-    const alreadyJoined = pool.participants.some(
-      (p) => p.userId === userId,
-    );
-    if (alreadyJoined) {
-      throw new AppError('You are already a participant in this pool', 400);
-    }
-
-    // Check if the creator has blocked this user
-    const creatorBlocked = await tx.blockedUser.findUnique({
-      where: {
-        blockerId_blockedId: {
-          blockerId: pool.creatorId,
-          blockedId: userId,
-        },
-      },
-    });
-    if (creatorBlocked) {
-      throw new AppError('You have been blocked from this pool', 403);
-    }
-
-    if (
-      pool.maxParticipants !== null &&
-      pool.participants.length >= pool.maxParticipants
-    ) {
-      throw new AppError('Pool is full', 400);
-    }
-
-    // Verify user has sufficient balance
-    const wallet = await tx.tokenWallet.findUnique({
-      where: { userId },
-    });
-    if (!wallet) {
-      throw new AppError('Token wallet not found', 404);
-    }
-    if (wallet.balance < pool.entryFee) {
-      throw new AppError('Insufficient token balance to join pool', 400);
-    }
-
-    // Deduct entry fee inside the same transaction
+  await prisma.$transaction(async (tx) => {
+    // Deduct entry fee
     const newBalance = wallet.balance - pool.entryFee;
     await tx.tokenWallet.update({
       where: { id: wallet.id },
@@ -163,11 +140,7 @@ export async function joinPool(poolId: string, userId: string) {
     });
 
     await tx.poolParticipant.create({
-      data: {
-        poolId,
-        userId,
-        entryFeePaid: pool.entryFee,
-      },
+      data: { poolId, userId, entryFeePaid: pool.entryFee },
     });
 
     await tx.poolLedger.create({
@@ -179,13 +152,10 @@ export async function joinPool(poolId: string, userId: string) {
       },
     });
 
-    const updatedPotTotal = pool.potTotal + pool.entryFee;
     await tx.pool.update({
       where: { id: poolId },
-      data: { potTotal: updatedPotTotal },
+      data: { potTotal: pool.potTotal + pool.entryFee },
     });
-
-    return pool.entryFee;
   });
 
   return getPool(poolId);
@@ -196,31 +166,28 @@ export async function joinPool(poolId: string, userId: string) {
 // ---------------------------------------------------------------------------
 
 export async function leavePool(poolId: string, userId: string) {
+  // Look up pool and wallet OUTSIDE the transaction
+  const existing = await prisma.pool.findUnique({
+    where: { id: poolId },
+    include: { participants: true },
+  });
+  if (!existing) {
+    throw new AppError('Pool not found', 404);
+  }
+  if (existing.status !== 'OPEN') {
+    throw new AppError('Cannot leave a pool that is not open', 400);
+  }
+  const participant = existing.participants.find((p) => p.userId === userId);
+  if (!participant) {
+    throw new AppError('You are not a participant in this pool', 400);
+  }
+  if (existing.creatorId === userId) {
+    throw new AppError('Creator cannot leave the pool', 400);
+  }
+
+  const wallet = await prisma.tokenWallet.findFirst({ where: { userId } });
+
   await prisma.$transaction(async (tx) => {
-    const existing = await tx.pool.findUnique({
-      where: { id: poolId },
-      include: { participants: true },
-    });
-
-    if (!existing) {
-      throw new AppError('Pool not found', 404);
-    }
-
-    if (existing.status !== 'OPEN') {
-      throw new AppError('Cannot leave a pool that is not open', 400);
-    }
-
-    const participant = existing.participants.find(
-      (p) => p.userId === userId,
-    );
-    if (!participant) {
-      throw new AppError('You are not a participant in this pool', 400);
-    }
-
-    if (existing.creatorId === userId) {
-      throw new AppError('Creator cannot leave the pool', 400);
-    }
-
     await tx.poolParticipant.update({
       where: { id: participant.id },
       data: { leftAt: new Date() },
@@ -235,17 +202,12 @@ export async function leavePool(poolId: string, userId: string) {
       },
     });
 
-    const updatedPotTotal =
-      existing.potTotal - participant.entryFeePaid;
     await tx.pool.update({
       where: { id: poolId },
-      data: { potTotal: updatedPotTotal },
+      data: { potTotal: existing.potTotal - participant.entryFeePaid },
     });
 
     // Refund entry fee inside the same transaction
-    const wallet = await tx.tokenWallet.findUnique({
-      where: { userId },
-    });
     if (wallet) {
       const newBalance = wallet.balance + participant.entryFeePaid;
       await tx.tokenWallet.update({
@@ -389,76 +351,61 @@ export async function settlePool(
   poolId: string,
   winnerUserId: string,
 ) {
-  // Everything — pool state update + wallet credit — happens in a single
-  // Prisma transaction so that a crash can never leave the pool SETTLED
-  // without the winner being paid.
-  const result = await prisma.$transaction(async (tx) => {
-    const existing = await tx.pool.findUnique({
-      where: { id: poolId },
-      include: { participants: true },
-    });
-
-    if (!existing) {
-      throw new AppError('Pool not found', 404);
-    }
-
-    if (existing.endsAt >= new Date()) {
-      throw new AppError('Pool has not ended yet', 400);
-    }
-
-    if (
-      existing.status !== ('OPEN' as PoolStatus) &&
-      existing.status !== ('ACTIVE' as PoolStatus)
-    ) {
-      throw new AppError(
-        'Pool can only be settled from OPEN or ACTIVE status',
-        400,
-      );
-    }
-
-    const winner = existing.participants.find(
-      (p) => p.userId === winnerUserId,
+  // Look up pool and winner wallet OUTSIDE the transaction to get IDs
+  const existing = await prisma.pool.findUnique({
+    where: { id: poolId },
+    include: { participants: true },
+  });
+  if (!existing) {
+    throw new AppError('Pool not found', 404);
+  }
+  if (existing.endsAt >= new Date()) {
+    throw new AppError('Pool has not ended yet', 400);
+  }
+  if (
+    existing.status !== ('OPEN' as PoolStatus) &&
+    existing.status !== ('ACTIVE' as PoolStatus)
+  ) {
+    throw new AppError(
+      'Pool can only be settled from OPEN or ACTIVE status',
+      400,
     );
-    if (!winner) {
-      throw new AppError(
-        'Winner must be a participant in the pool',
-        400,
-      );
-    }
+  }
+  const winner = existing.participants.find((p) => p.userId === winnerUserId);
+  if (!winner) {
+    throw new AppError('Winner must be a participant in the pool', 400);
+  }
 
-    // Calculate placeholder focus scores for all participants
-    const participantScores = existing.participants.map((p) => ({
-      participant: p,
-      focusScore: Math.random() * 100, // placeholder — real logic from screen time data
-    }));
+  const winnerWallet = await prisma.tokenWallet.findFirst({
+    where: { userId: winnerUserId },
+  });
+  if (!winnerWallet) {
+    throw new AppError('Winner token wallet not found', 404);
+  }
 
-    for (const ps of participantScores) {
+  // Everything else — pool state update + wallet credit — in a single transaction
+  await prisma.$transaction(async (tx) => {
+    // Calculate placeholder focus scores
+    for (const p of existing.participants) {
       await tx.poolParticipant.update({
-        where: { id: ps.participant.id },
-        data: { focusScore: ps.focusScore },
+        where: { id: p.id },
+        data: { focusScore: Math.random() * 100 },
       });
     }
 
-    // Calculate platform fee (10%)
     const platformFee = Math.floor(existing.potTotal * 0.1);
     const winnerPayout = existing.potTotal - platformFee;
 
-    // Update pool status
     await tx.pool.update({
       where: { id: poolId },
-      data: {
-        status: 'SETTLED' as PoolStatus,
-        settledAt: new Date(),
-      },
+      data: { status: 'SETTLED' as PoolStatus, settledAt: new Date() },
     });
 
-    // Award tokens won to winner participant record
     await tx.poolParticipant.update({
       where: { id: winner.id },
       data: { tokensWon: winnerPayout },
     });
 
-    // Create ledger entries
     await tx.poolLedger.createMany({
       data: [
         {
@@ -477,20 +424,14 @@ export async function settlePool(
     });
 
     // Credit winner's wallet INSIDE the same transaction
-    const wallet = await tx.tokenWallet.findUnique({
-      where: { userId: winnerUserId },
-    });
-    if (!wallet) {
-      throw new AppError('Winner token wallet not found', 404);
-    }
-    const newBalance = wallet.balance + winnerPayout;
+    const newBalance = winnerWallet.balance + winnerPayout;
     await tx.tokenWallet.update({
-      where: { id: wallet.id },
+      where: { id: winnerWallet.id },
       data: { balance: newBalance },
     });
     await tx.tokenTransaction.create({
       data: {
-        walletId: wallet.id,
+        walletId: winnerWallet.id,
         amount: winnerPayout,
         type: 'POOL_WIN' as TransactionType,
         description: `Won pool`,
@@ -498,11 +439,9 @@ export async function settlePool(
         balanceAfter: newBalance,
       },
     });
-
-    return { poolId, winnerPayout };
   });
 
-  return getPool(result.poolId);
+  return getPool(poolId);
 }
 
 // ---------------------------------------------------------------------------

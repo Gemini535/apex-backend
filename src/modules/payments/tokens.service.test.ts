@@ -1,23 +1,29 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { prisma } from '../../config/database.js';
 import { getBalance, getTransactions, creditTokens, debitTokens } from './tokens.service.js';
 
 describe('tokens.service', () => {
   let testUserId: string;
 
-  beforeAll(async () => {
+  beforeEach(async () => {
+    // Create a fresh user + wallet for each test
     const user = await prisma.user.create({
       data: {
-        email: `tokens-test-${Date.now()}@test.app`,
-        username: `tokens-test-${Date.now()}`,
+        email: `tokens-test-${Date.now()}-${Math.random().toString(36).slice(2)}@test.app`,
+        username: `tokens-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         passwordHash: 'fake',
-        tokenWallet: { create: { balance: 100 } },
       },
     });
     testUserId = user.id;
+    await prisma.tokenWallet.create({
+      data: { userId: testUserId, balance: 100 },
+    });
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
+    // Clean up everything for this test's user
+    await prisma.tokenTransaction.deleteMany({ where: { wallet: { userId: testUserId } } });
+    await prisma.tokenWallet.deleteMany({ where: { userId: testUserId } });
     await prisma.user.delete({ where: { id: testUserId } }).catch(() => {});
   });
 
@@ -54,8 +60,9 @@ describe('tokens.service', () => {
         orderBy: { createdAt: 'desc' },
         take: 1,
       });
+      expect(txs).toHaveLength(1);
       expect(txs[0].amount).toBe(25);
-      expect(txs[0].balanceAfter).toBe(175); // 150 + 25
+      expect(txs[0].balanceAfter).toBe(125); // 100 + 25
       expect(txs[0].type).toBe('BONUS');
       expect(txs[0].description).toBe('Transaction test');
     });
@@ -68,9 +75,8 @@ describe('tokens.service', () => {
 
   describe('debitTokens', () => {
     it('decreases balance by the debited amount', async () => {
-      // Balance is 175 from previous tests
-      const result = await debitTokens(testUserId, 75, 'SPENT', 'Test debit');
-      expect(result.balance).toBe(100); // 175 - 75
+      const result = await debitTokens(testUserId, 30, 'SPENT', 'Test debit');
+      expect(result.balance).toBe(70); // 100 - 30
     });
 
     it('creates a transaction record with negative amount', async () => {
@@ -80,12 +86,12 @@ describe('tokens.service', () => {
         orderBy: { createdAt: 'desc' },
         take: 1,
       });
+      expect(txs).toHaveLength(1);
       expect(txs[0].amount).toBe(-10);
       expect(txs[0].balanceAfter).toBe(90); // 100 - 10
     });
 
     it('throws on insufficient balance', async () => {
-      // Balance is 90
       await expect(debitTokens(testUserId, 1000, 'SPENT')).rejects.toThrow('Insufficient token balance');
     });
 
@@ -103,11 +109,15 @@ describe('tokens.service', () => {
 
   describe('getTransactions', () => {
     it('returns paginated transactions', async () => {
+      await creditTokens(testUserId, 10, 'BONUS', 'Tx 1');
+      await creditTokens(testUserId, 20, 'BONUS', 'Tx 2');
+      await debitTokens(testUserId, 5, 'SPENT', 'Tx 3');
+
       const result = await getTransactions(testUserId, 1, 5);
-      expect(result.transactions.length).toBeLessThanOrEqual(5);
+      expect(result.transactions.length).toBe(3);
       expect(result.page).toBe(1);
       expect(result.limit).toBe(5);
-      expect(result.total).toBeGreaterThan(0);
+      expect(result.total).toBe(3);
     });
 
     it('returns empty for user with no wallet', async () => {
