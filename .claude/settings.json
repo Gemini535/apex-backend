@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npx prisma generate 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); npx tsc --noEmit 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npx tsc --noEmit 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npm install 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npx vitest run 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npx vitest run --reporter=verbose 2>&1 | Select-String -Pattern \"✓|✗|FAIL|PASS|skipped\" | Select-Object -First 40)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); psql -U postgres -c \"SELECT version\\(\\);\" 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; npx vitest run --reporter=verbose 2>&1)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"c:\\\\Users\\\\leosc\\\\OneDrive\\\\Documents\\\\my_app_backend\"; git init 2>&1)"
+    ]
+  }
+}

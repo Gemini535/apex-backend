@@ -1,0 +1,310 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── User & Authentication ───────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(uuid())
+  email          String   @unique
+  username       String   @unique
+  passwordHash   String?
+  avatarUrl      String?
+
+  // OAuth
+  appleId        String?  @unique
+  googleId       String?  @unique
+
+  // Profile
+  displayName    String?
+  bio            String?
+  timezone       String   @default("UTC")
+
+  // Brain state
+  brainHealth    Int      @default(100) // 0-100 percentage
+  brainTier      BrainTier @default(PRISTINE)
+
+  // Streak
+  currentStreak  Int      @default(0)
+  longestStreak  Int      @default(0)
+
+  // Timestamps
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  lastLoginAt    DateTime?
+
+  // Relations
+  sessions       Session[]
+  twoFactor      TwoFactorSetting?
+  tokenWallet    TokenWallet?
+  friendshipsInitiated Friendship[] @relation("FriendshipInitiator")
+  friendshipsReceived  Friendship[] @relation("FriendshipReceiver")
+  friendRequestsSent   FriendRequest[] @relation("FriendRequestSender")
+  friendRequestsReceived FriendRequest[] @relation("FriendRequestReceiver")
+  blockedUsers         BlockedUser[]     @relation("Blocker")
+  blockedByUsers       BlockedUser[]     @relation("Blocked")
+  screenTimeEntries    ScreenTimeEntry[]
+  brainStates          BrainState[]
+  poolParticipants     PoolParticipant[]
+  poolsCreated         Pool[]            @relation("PoolCreator")
+  paymentAccounts      PaymentAccount[]
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshToken String   @unique
+  deviceInfo   String?
+  ipAddress    String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@index([refreshToken])
+}
+
+model TwoFactorSetting {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  totpSecret      String?
+  totpEnabled     Boolean  @default(false)
+  backupCodes     String[] // hashed backup codes
+
+  smsEnabled      Boolean  @default(false)
+  smsPhoneNumber  String?
+
+  emailEnabled    Boolean  @default(false)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ─── Friends ─────────────────────────────────────────────────────────────────
+
+model Friendship {
+  id         String   @id @default(uuid())
+  userId     String
+  friendId   String
+  user       User     @relation("FriendshipInitiator", fields: [userId], references: [id], onDelete: Cascade)
+  friend     User     @relation("FriendshipReceiver", fields: [friendId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, friendId])
+  @@index([userId])
+  @@index([friendId])
+}
+
+model FriendRequest {
+  id         String              @id @default(uuid())
+  senderId   String
+  receiverId String
+  sender     User                @relation("FriendRequestSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver   User                @relation("FriendRequestReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  status     FriendRequestStatus @default(PENDING)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  @@unique([senderId, receiverId])
+  @@index([receiverId])
+  @@index([senderId])
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+model BlockedUser {
+  id        String   @id @default(uuid())
+  blockerId String
+  blockedId String
+  blocker   User     @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked   User     @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([blockerId, blockedId])
+  @@index([blockerId])
+}
+
+// ─── Tokens & Payments ───────────────────────────────────────────────────────
+
+model TokenWallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions TokenTransaction[]
+}
+
+model TokenTransaction {
+  id          String            @id @default(uuid())
+  walletId    String
+  wallet      TokenWallet       @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  amount      Int               // positive = credit, negative = debit
+  type        TransactionType
+  description String?
+  referenceId String?           // pool_id, purchase_id, etc.
+  balanceAfter Int              // snapshot of balance after this tx
+  createdAt   DateTime          @default(now())
+
+  @@index([walletId])
+  @@index([createdAt])
+}
+
+enum TransactionType {
+  EARNED
+  SPENT
+  POOL_ENTRY
+  POOL_WIN
+  POOL_REFUND
+  PURCHASE
+  BONUS
+  PENALTY
+}
+
+model Pool {
+  id            String        @id @default(uuid())
+  creatorId     String
+  creator       User          @relation("PoolCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  entryFee      Int           // in tokens
+  maxParticipants Int?
+  status        PoolStatus    @default(OPEN)
+  potTotal      Int           @default(0)
+  startedAt     DateTime?
+  endsAt        DateTime
+  settledAt     DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  participants  PoolParticipant[]
+  ledger        PoolLedger[]
+
+  @@index([status])
+  @@index([creatorId])
+}
+
+model PoolParticipant {
+  id           String    @id @default(uuid())
+  poolId       String
+  userId       String
+  pool         Pool      @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entryFeePaid Int       @default(0)
+  tokensWon    Int       @default(0)
+  focusScore   Float?    // calculated at settlement
+  joinedAt     DateTime  @default(now())
+  leftAt       DateTime?
+
+  @@unique([poolId, userId])
+  @@index([poolId])
+  @@index([userId])
+}
+
+model PoolLedger {
+  id          String       @id @default(uuid())
+  poolId      String
+  pool        Pool         @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  type        PoolLedgerType
+  amount      Int
+  description String
+  createdAt   DateTime     @default(now())
+
+  @@index([poolId])
+}
+
+enum PoolStatus {
+  OPEN
+  ACTIVE
+  SETTLING
+  SETTLED
+  CANCELLED
+}
+
+enum PoolLedgerType {
+  ENTRY_FEE
+  WINNING_PAYOUT
+  REFUND
+  PLATFORM_FEE
+}
+
+model PaymentAccount {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stripeCustomerId String? @unique
+  stripeConnectedAccountId String? @unique
+  paymentMethod String?  // 'stripe', 'paypal', etc.
+  last4         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ─── Screen Time ─────────────────────────────────────────────────────────────
+
+model ScreenTimeEntry {
+  id          String       @id @default(uuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appName     String
+  appBundleId String?      // iOS bundle identifier
+  category    AppCategory
+  duration    Int          // in seconds
+  startedAt   DateTime
+  endedAt     DateTime?
+  isBlacklisted Boolean    @default(false)
+  createdAt   DateTime     @default(now())
+
+  @@index([userId, startedAt])
+  @@index([userId, category])
+}
+
+enum AppCategory {
+  SOCIAL
+  GAMES
+  ENTERTAINMENT
+  PRODUCTIVITY
+  UTILITIES
+  PHOTO_VIDEO
+  LIFESTYLE
+  OTHER
+}
+
+model BrainState {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date            DateTime  @db.Date
+  tier            BrainTier @default(PRISTINE)
+  healthPercent   Int       @default(100) // 0-100
+  totalScreenTime Int       @default(0)  // seconds
+  focusTime       Int       @default(0)  // seconds
+  categoryBreakdown Json?   // { SOCIAL: 3600, GAMES: 1800, ... }
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId, date])
+}
+
+enum BrainTier {
+  PRISTINE    // Tier 1: 0-100% focus target maintained
+  FOG         // Tier 2: approaching limits
+  SLIME       // Tier 3: exceeding limits
+  GRAY_VOID   // Tier 4: prolonged failure
+}
