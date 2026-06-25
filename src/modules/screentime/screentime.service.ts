@@ -134,6 +134,14 @@ export async function uploadBatch(
   }));
 
   const result = await prisma.screenTimeEntry.createMany({ data });
+
+  // Recalculate brain state after new data (fire and forget)
+  import('../../shared/brain-engine.js')
+    .then(({ recalculateBrainState }) => recalculateBrainState(userId))
+    .catch(() => {
+      // Non-critical — brain state will be recalculated on next read
+    });
+
   return { count: result.count };
 }
 

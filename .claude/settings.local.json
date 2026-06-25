@@ -14,7 +14,8 @@
       "Bash(git commit -m 'Add power-ups, cosmetics, commitment contracts, and token wheel *)",
       "Bash(node_modules/.bin/tsc --noEmit)",
       "Bash(echo \"EXIT: $?\")",
-      "Bash(git commit -m 'Add streak engine, session management, password reset, email verification *)"
+      "Bash(git commit -m 'Add streak engine, session management, password reset, email verification *)",
+      "Bash(git commit -m 'Add brain state real-time engine + integrate with screen time uploads *)"
     ]
   }
 }
