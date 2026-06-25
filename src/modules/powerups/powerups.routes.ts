@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticateToken } from '../../middleware/auth.js';
+import { wheelLimiter } from '../../middleware/rateLimiter.js';
 import {
   spinWheelHandler,
   getPowerUpsHandler,
@@ -14,7 +15,8 @@ import {
 const router = Router();
 
 // ─── Token Wheel ──────────────────────────────────────────────────────────────
-router.post('/wheel/spin', authenticateToken, spinWheelHandler);
+// authenticateToken runs first so wheelLimiter can key off req.user.userId
+router.post('/wheel/spin', authenticateToken, wheelLimiter, spinWheelHandler);
 
 // ─── Power-Ups ────────────────────────────────────────────────────────────────
 router.get('/power-ups', authenticateToken, getPowerUpsHandler);

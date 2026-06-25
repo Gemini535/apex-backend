@@ -5,5 +5,7 @@ declare namespace Express {
       email: string;
       username: string;
     };
+    /** Unique id for correlating logs across a single request. */
+    requestId?: string;
   }
 }

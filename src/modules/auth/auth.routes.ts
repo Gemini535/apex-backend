@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticateToken } from '../../middleware/auth.js';
 import { validate } from '../../middleware/validate.js';
+import { authLimiter } from '../../middleware/rateLimiter.js';
 import {
   register as registerValidation,
   login as loginValidation,
@@ -43,19 +44,19 @@ const router = Router();
 // ─── Public routes ─────────────────────────────────────────────────────────
 
 router.post('/register', validate(registerValidation), register);
-router.post('/login', validate(loginValidation), login);
-router.post('/login/2fa', validate(verify2FAValidation), verify2FALogin);
+router.post('/login', authLimiter, validate(loginValidation), login);
+router.post('/login/2fa', authLimiter, validate(verify2FAValidation), verify2FALogin);
 router.post('/apple', validate(oauthValidation), appleAuth);
 router.post('/google', validate(oauthValidation), googleAuth);
 router.post('/refresh', validate(refreshTokenValidation), refresh);
 router.post('/logout', authenticateToken, logout);
 
-// Password reset
-router.post('/password/forgot', validate(forgotPassword), forgotPasswordHandler);
-router.post('/password/reset', validate(resetPassword), resetPasswordHandler);
+// Password reset — strict limiter prevents email enumeration & SMS pumping
+router.post('/password/forgot', authLimiter, validate(forgotPassword), forgotPasswordHandler);
+router.post('/password/reset', authLimiter, validate(resetPassword), resetPasswordHandler);
 
 // Email verification (public — user clicks link in email)
-router.post('/verify-email', validate(verifyEmailBody), verifyEmailHandler);
+router.post('/verify-email', authLimiter, validate(verifyEmailBody), verifyEmailHandler);
 
 // ─── Authenticated 2FA routes ───────────────────────────────────────────────
 

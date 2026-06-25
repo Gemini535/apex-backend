@@ -2,7 +2,10 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import { generalLimiter } from './middleware/rateLimiter.js';
-import { errorHandler } from './middleware/errorHandler.js';
+import { errorHandler, requestIdMiddleware } from './middleware/errorHandler.js';
+import { sanitizeInput } from './middleware/sanitize.js';
+import { healthHandler } from './middleware/health.js';
+import { docsJsonHandler, docsUiHandler } from './middleware/docs.js';
 
 // Route modules
 import authRouter from './modules/auth/auth.routes.js';
@@ -28,18 +31,28 @@ app.post(
 app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-    ? ['https://apex-app.com']
+    ? (process.env.FRONTEND_URL ?? 'https://apex-app.com')
     : '*',
   credentials: true,
 }));
 app.use(express.json({ limit: '1mb' }));
+// Assign a request id before any other middleware runs so it's available
+// everywhere — including the rate limiter's error path.
+app.use(requestIdMiddleware);
 app.use(generalLimiter);
+// Sanitize all incoming strings after body parsing, before routes see them.
+// Runs globally so every endpoint is protected without per-route wiring.
+app.use(sanitizeInput);
 
 // ─── Health Check ───────────────────────────────────────────────────────────
 
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+app.get('/health', healthHandler);
+
+// ─── API Documentation ─────────────────────────────────────────────────────
+// Public — no auth required. Serves the OpenAPI spec and an interactive UI.
+
+app.get('/api/docs.json', docsJsonHandler);
+app.get('/api/docs', docsUiHandler);
 
 // ─── API Routes ─────────────────────────────────────────────────────────────
 
