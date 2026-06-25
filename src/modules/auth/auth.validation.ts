@@ -58,3 +58,33 @@ export const refreshToken = [
     .notEmpty()
     .withMessage('Refresh token is required'),
 ];
+
+// ─── Password Reset ──────────────────────────────────────────────────────────
+
+export const forgotPassword = [
+  body('email')
+    .isEmail()
+    .withMessage('A valid email address is required')
+    .normalizeEmail(),
+];
+
+export const resetPassword = [
+  body('token')
+    .notEmpty()
+    .withMessage('Reset token is required'),
+  body('password')
+    .isLength({ min: 8 })
+    .withMessage('Password must be at least 8 characters long')
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).+$/)
+    .withMessage(
+      'Password must contain at least one uppercase letter, one lowercase letter, one digit, and one special character'
+    ),
+];
+
+// ─── Email Verification ─────────────────────────────────────────────────────
+
+export const verifyEmailBody = [
+  body('token')
+    .notEmpty()
+    .withMessage('Verification token is required'),
+];
