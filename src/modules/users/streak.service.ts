@@ -20,6 +20,43 @@ const STREAK_PRESERVING_TIERS: BrainTier[] = ['PRISTINE', 'FOG'];
 /** Minimum focus seconds required to count as an "active" day (default 2 hours). */
 const DEFAULT_FOCUS_TARGET_SECONDS = 2 * 60 * 60;
 
+// ─── Batch evaluation ─────────────────────────────────────────────────────────
+
+/**
+ * Re-evaluates streaks for every user. Invoked by the queue on a schedule so
+ * that users who don't upload screen time don't keep a stale streak forever.
+ * Chunks the user lookups to avoid long-held locks.
+ */
+export async function evaluateAllStreaks(batchSize = 200): Promise<number> {
+  let cursorId: string | undefined;
+  let processedTotal = 0;
+
+  for (;;) {
+    const users = await prisma.user.findMany({
+      where: cursorId ? { id: { gt: cursorId } } : undefined,
+      select: { id: true },
+      take: batchSize,
+      orderBy: { id: 'asc' },
+    });
+
+    if (users.length === 0) break;
+
+    for (const user of users) {
+      try {
+        await evaluateStreak(user.id);
+      } catch (err) {
+        logger.error({ err, userId: user.id }, 'Streak evaluation failed for user');
+      }
+      processedTotal += 1;
+    }
+
+    if (users.length < batchSize) break;
+    cursorId = users[users.length - 1].id;
+  }
+
+  return processedTotal;
+}
+
 // ─── Core Streak Logic ───────────────────────────────────────────────────────
 
 /**

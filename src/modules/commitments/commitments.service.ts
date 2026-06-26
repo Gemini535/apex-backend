@@ -1,6 +1,29 @@
 import { prisma } from '../../config/database.js';
 import { AppError } from '../../middleware/errorHandler.js';
 
+// ─── Deadline Evaluation ───────────────────────────────────────────────────────
+
+/**
+ * Transitions any ACTIVE commitment contracts whose deadline has passed to
+ * FAILED. Called by the queue job `handleContractDeadlineEval`, but exposed
+ * separately so it can also be triggered inline (e.g., in a manual
+ * administration endpoint).
+ */
+export async function evaluateDeadlines(userId?: string): Promise<number> {
+  const now = new Date();
+
+  const result = await prisma.commitmentContract.updateMany({
+    where: {
+      status: 'ACTIVE',
+      endDate: { lte: now },
+      ...(userId ? { userId } : {}),
+    },
+    data: { status: 'FORFEITED' },
+  });
+
+  return result.count;
+}
+
 // ─── Commitment Contracts ─────────────────────────────────────────────────────
 
 export async function createContract(
