@@ -7,14 +7,29 @@ import { sanitizeInput } from './middleware/sanitize.js';
 import { healthHandler } from './middleware/health.js';
 import { docsJsonHandler, docsUiHandler } from './middleware/docs.js';
 
-// Route modules
+// Route modules — auth
 import authRouter from './modules/auth/auth.routes.js';
 import usersRouter from './modules/users/users.routes.js';
 import friendsRouter from './modules/friends/friends.routes.js';
+
+// Route modules — tokens
+import tokensRouter from './modules/tokens/tokens.routes.js';
+
+// Route modules — payments (Stripe)
 import paymentsRouter from './modules/payments/payments.routes.js';
 import { webhookHandler } from './modules/payments/payments.routes.js';
-import screentimeRouter from './modules/screentime/screentime.routes.js';
+
+// Route modules — pools
+import poolsRouter from './modules/pools/pools.routes.js';
+
+// Route modules — wheel, power-ups, cosmetics, commitments
+import wheelRouter from './modules/wheel/wheel.routes.js';
 import powerupsRouter from './modules/powerups/powerups.routes.js';
+import cosmeticsRouter from './modules/cosmetics/cosmetics.routes.js';
+import commitmentsRouter from './modules/commitments/commitments.routes.js';
+
+// Route modules — screen time
+import screentimeRouter from './modules/screentime/screentime.routes.js';
 
 const app = express();
 
@@ -56,12 +71,28 @@ app.get('/api/docs', docsUiHandler);
 
 // ─── API Routes ─────────────────────────────────────────────────────────────
 
+// ─── Auth & Users ─────────────────────────────────────────────────────────
 app.use('/api/auth', authRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/friends', friendsRouter);
-app.use('/api', paymentsRouter); // /api/tokens/*, /api/pools/*, /api/payments/*
+
+// ─── Tokens ───────────────────────────────────────────────────────────────
+app.use('/api/tokens', tokensRouter);
+
+// ─── Payments (Stripe) ────────────────────────────────────────────────────
+app.use('/api/payments', paymentsRouter);
+
+// ─── Pools ────────────────────────────────────────────────────────────────
+app.use('/api/pools', poolsRouter);
+
+// ─── Wheel, Power-Ups, Cosmetics, Commitments ─────────────────────────────
+app.use('/api/wheel', wheelRouter);
+app.use('/api/power-ups', powerupsRouter);
+app.use('/api/cosmetics', cosmeticsRouter);
+app.use('/api/commitments', commitmentsRouter);
+
+// ─── Screen Time ──────────────────────────────────────────────────────────
 app.use('/api/screentime', screentimeRouter);
-app.use('/api', powerupsRouter); // /api/wheel/*, /api/power-ups/*, /api/cosmetics/*, /api/commitments/*
 
 // ─── 404 Handler ───────────────────────────────────────────────────────────
 

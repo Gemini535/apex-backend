@@ -53,54 +53,6 @@ describe('payments.controller', () => {
     await prisma.user.delete({ where: { id: testUserId } }).catch(() => {});
   });
 
-  // We test the controller logic indirectly through the service layer
-  // since controllers are thin wrappers. The key things to verify are:
-  // 1. Authorization checks on settlePool
-  // 2. Input validation on deposit/withdraw
-  // 3. Idempotency key requirement
-
-  describe('settlePool authorization', () => {
-    it('only pool creator can settle', async () => {
-      const { getPool } = await import('./pools.service.js');
-      const { settlePoolHandler } = await import('./payments.controller.js');
-
-      // Create a pool with testUser as creator
-      const { createPool } = await import('./pools.service.js');
-      const endsAt = new Date(Date.now() - 1000); // already ended
-      const pool = await createPool(testUserId, 'Auth Test Pool', undefined, 10, 10, endsAt);
-
-      // Create a second user to try settling
-      const otherUser = await prisma.user.create({
-        data: {
-          email: `other-settler-${Date.now()}@test.app`,
-          username: `other-settler-${Date.now()}`,
-          passwordHash: 'fake',
-          tokenWallet: { create: { balance: 500 } },
-        },
-      });
-
-      // Mock request from non-creator
-      const mockReq = {
-        user: { userId: otherUser.id, email: '', username: '' },
-        params: { poolId: pool.id },
-        body: { winnerUserId: testUserId },
-      } as any;
-      const mockRes = { json: vi.fn(), status: vi.fn().mockReturnThis() } as any;
-      const mockNext = vi.fn();
-
-      await settlePoolHandler(mockReq, mockRes, mockNext);
-
-      // Should call next with an error (403)
-      expect(mockNext).toHaveBeenCalled();
-      const error = mockNext.mock.calls[0][0];
-      expect(error.message).toBe('Only the pool creator can settle the pool');
-      expect(error.statusCode).toBe(403);
-
-      // Cleanup
-      await prisma.user.delete({ where: { id: otherUser.id } }).catch(() => {});
-    });
-  });
-
   describe('deposit validation', () => {
     it('requires idempotencyKey', async () => {
       const { depositHandler } = await import('./payments.controller.js');

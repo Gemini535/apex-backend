@@ -1,34 +1,10 @@
 import { Router } from 'express';
 import { authenticateToken } from '../../middleware/auth.js';
-import { wheelLimiter } from '../../middleware/rateLimiter.js';
-import {
-  spinWheelHandler,
-  getPowerUpsHandler,
-  activatePowerUpHandler,
-  getCosmeticsHandler,
-  equipCosmeticHandler,
-  createContractHandler,
-  getContractsHandler,
-  cancelContractHandler,
-} from './powerups.controller.js';
+import { getPowerUpsHandler, activatePowerUpHandler } from './powerups.controller.js';
 
-const router = Router();
+export const router = Router();
 
-// ─── Token Wheel ──────────────────────────────────────────────────────────────
-// authenticateToken runs first so wheelLimiter can key off req.user.userId
-router.post('/wheel/spin', authenticateToken, wheelLimiter, spinWheelHandler);
-
-// ─── Power-Ups ────────────────────────────────────────────────────────────────
-router.get('/power-ups', authenticateToken, getPowerUpsHandler);
-router.post('/power-ups/activate', authenticateToken, activatePowerUpHandler);
-
-// ─── Cosmetics (Cortex Vault) ─────────────────────────────────────────────────
-router.get('/cosmetics', authenticateToken, getCosmeticsHandler);
-router.post('/cosmetics/equip', authenticateToken, equipCosmeticHandler);
-
-// ─── Commitment Contracts ─────────────────────────────────────────────────────
-router.post('/commitments', authenticateToken, createContractHandler);
-router.get('/commitments', authenticateToken, getContractsHandler);
-router.post('/commitments/:contractId/cancel', authenticateToken, cancelContractHandler);
+router.get('/', authenticateToken, getPowerUpsHandler);
+router.post('/activate', authenticateToken, activatePowerUpHandler);
 
 export default router;

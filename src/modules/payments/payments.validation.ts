@@ -1,35 +1,19 @@
-import { body, param } from 'express-validator';
+import { body } from 'express-validator';
 
-export const createPool = [
-  body('name')
+export const deposit = [
+  body('amount')
+    .isInt({ min: 100, max: 50000 })
+    .withMessage('amount must be between 100 ($1.00) and 50,000 ($500.00) cents'),
+  body('idempotencyKey')
     .notEmpty()
-    .withMessage('Pool name is required')
-    .isLength({ min: 1, max: 100 })
-    .withMessage('Pool name must be between 1 and 100 characters'),
-
-  body('entryFee')
-    .isInt({ min: 1, max: 10000 })
-    .withMessage('Entry fee must be between 1 and 10,000 tokens'),
-
-  body('maxParticipants')
-    .optional()
-    .isInt({ min: 2 })
-    .withMessage('Max participants must be at least 2'),
-
-  body('endsAt')
-    .isISO8601()
-    .withMessage('endsAt must be a valid ISO 8601 date')
-    .custom((value: string) => {
-      const endDate = new Date(value);
-      if (endDate <= new Date()) {
-        throw new Error('endsAt must be in the future');
-      }
-      return true;
-    }),
+    .withMessage('idempotencyKey is required to prevent duplicate charges'),
 ];
 
-export const joinPool = [
-  param('poolId')
-    .isUUID()
-    .withMessage('poolId must be a valid UUID'),
+export const withdraw = [
+  body('amount')
+    .isInt({ min: 100 })
+    .withMessage('amount must be at least 100 tokens ($1.00)'),
+  body('idempotencyKey')
+    .notEmpty()
+    .withMessage('idempotencyKey is required to prevent duplicate withdrawals'),
 ];

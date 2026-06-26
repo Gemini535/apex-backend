@@ -3,7 +3,7 @@ import { prisma } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { AppError } from '../../middleware/errorHandler.js';
-import { creditTokens, debitTokens } from './tokens.service.js';
+import { creditTokens, debitTokens } from '../tokens/tokens.service.js';
 
 // ─── Stripe client ───────────────────────────────────────────────────────────
 
