@@ -1,6 +1,6 @@
 import { prisma } from '../../config/database.js';
 import type { AppCategory, BrainTier } from '@prisma/client';
-import { calculateTier, calculateHealth } from '../../shared/brain-engine.js';
+import { calculateTier, calculateHealth, recalculateBrainState } from '../../shared/brain-engine.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -121,11 +121,9 @@ export async function uploadBatch(
   const result = await prisma.screenTimeEntry.createMany({ data });
 
   // Recalculate brain state after new data (fire and forget)
-  import('../../shared/brain-engine.js')
-    .then(({ recalculateBrainState }) => recalculateBrainState(userId))
-    .catch(() => {
-      // Non-critical — brain state will be recalculated on next read
-    });
+  void recalculateBrainState(userId).catch(() => {
+    // Non-critical — brain state will be recalculated on next read
+  });
 
   return { count: result.count };
 }
