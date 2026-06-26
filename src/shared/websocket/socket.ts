@@ -3,6 +3,7 @@ import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
+import { prisma } from '../../config/database.js';
 
 interface SocketUser {
   userId: string;
@@ -56,8 +57,8 @@ export function initializeSocket(server: HttpServer): Server {
     }
     onlineUsers.get(userId)!.add(socket.id);
 
-    // Broadcast online status to friends
-    io.emit('friend:online', { userId });
+    // Broadcast online status to friends (fire and forget)
+    void broadcastPresence(userId, 'friend:online', { userId });
 
     // ─── Screen Time Events ──────────────────────────────────────────────
 
@@ -102,13 +103,42 @@ export function initializeSocket(server: HttpServer): Server {
         sockets.delete(socket.id);
         if (sockets.size === 0) {
           onlineUsers.delete(userId);
-          io.emit('friend:offline', { userId });
+          void broadcastPresence(userId, 'friend:offline', { userId });
         }
       }
     });
   });
 
   return io;
+}
+
+/**
+ * Looks up a user's friends from the database (both directions of the
+ * Friendship relation) and broadcasts an event to only the socket IDs of
+ * online friends. This replaces the old io.emit broadcast, which notified
+ * every connected client.
+ */
+async function broadcastPresence(
+  userId: string,
+  event: string,
+  data: unknown,
+): Promise<void> {
+  try {
+    const friendships = await prisma.friendship.findMany({
+      where: { OR: [{ userId }, { friendId: userId }] },
+      select: { userId: true, friendId: true },
+    });
+
+    const friendIds = friendships.map((f) =>
+      f.userId === userId ? f.friendId : f.userId,
+    );
+
+    for (const friendId of friendIds) {
+      emitToUser(friendId, event, data);
+    }
+  } catch (err) {
+    logger.error({ err, userId }, 'Failed to broadcast presence');
+  }
 }
 
 export function getIO(): Server {
