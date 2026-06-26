@@ -181,7 +181,7 @@ export function getBrainExpression(tier: BrainTier): {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function calculateTier(totalSeconds: number): BrainTier {
+export function calculateTier(totalSeconds: number): BrainTier {
   const hours = totalSeconds / 3600;
   if (hours <= TIER_THRESHOLDS.PRISTINE) return 'PRISTINE';
   if (hours <= TIER_THRESHOLDS.FOG) return 'FOG';
@@ -189,7 +189,7 @@ function calculateTier(totalSeconds: number): BrainTier {
   return 'GRAY_VOID';
 }
 
-function calculateHealth(totalSeconds: number, focusSeconds: number): number {
+export function calculateHealth(totalSeconds: number, focusSeconds: number): number {
   const hours = totalSeconds / 3600;
   const focusRatio = totalSeconds > 0 ? focusSeconds / totalSeconds : 0;
 

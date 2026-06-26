@@ -81,7 +81,7 @@ describe('screentime.service', () => {
       const summary = await getTodaySummary(testUserId);
       expect(summary.totalSeconds).toBe(5400);
       expect(summary.brainTier).toBe('PRISTINE');
-      expect(summary.brainHealth).toBe(100);
+      expect(summary.brainHealth).toBe(90);
       expect(summary.categories.length).toBe(2);
       expect(summary.topApps.length).toBe(2);
     });
@@ -90,7 +90,8 @@ describe('screentime.service', () => {
       const summary = await getTodaySummary(testUserId);
       expect(summary.totalSeconds).toBe(0);
       expect(summary.brainTier).toBe('PRISTINE');
-      expect(summary.brainHealth).toBe(100);
+      // zero-length session => 70 baseline (no focus-ratio bonus)
+      expect(summary.brainHealth).toBe(70);
     });
 
     it('categorizes focus time correctly', async () => {

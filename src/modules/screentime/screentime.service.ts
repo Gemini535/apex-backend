@@ -1,5 +1,6 @@
 import { prisma } from '../../config/database.js';
 import type { AppCategory, BrainTier } from '@prisma/client';
+import { calculateTier, calculateHealth } from '../../shared/brain-engine.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -67,22 +68,6 @@ interface ActiveSession {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const FOCUS_CATEGORIES: AppCategory[] = ['PRODUCTIVITY', 'UTILITIES'];
-
-function calculateBrainTier(totalSeconds: number): BrainTier {
-  const hours = totalSeconds / 3600;
-  if (hours > 8) return 'GRAY_VOID';
-  if (hours > 6) return 'SLIME';
-  if (hours > 4) return 'FOG';
-  return 'PRISTINE';
-}
-
-function calculateBrainHealth(totalSeconds: number): number {
-  const hours = totalSeconds / 3600;
-  if (hours <= 4) return 100;
-  if (hours <= 6) return Math.round(100 - (hours - 4) * 15);
-  if (hours <= 8) return Math.round(70 - (hours - 6) * 20);
-  return Math.max(0, Math.round(30 - (hours - 8) * 10));
-}
 
 function buildCategoryBreakdown(
   entries: Array<{ category: AppCategory; duration: number }>,
@@ -162,8 +147,8 @@ export async function getTodaySummary(userId: string): Promise<TodaySummary> {
     .filter((e) => FOCUS_CATEGORIES.includes(e.category))
     .reduce((sum, e) => sum + e.duration, 0);
 
-  const brainTier = calculateBrainTier(totalSeconds);
-  const brainHealth = calculateBrainHealth(totalSeconds);
+  const brainTier = calculateTier(totalSeconds);
+  const brainHealth = calculateHealth(totalSeconds, focusSeconds);
 
   const categories = buildCategoryBreakdown(entries, totalSeconds);
 
@@ -228,8 +213,8 @@ export async function getRangeData(
     const focusSeconds = dayEntries
       .filter((e) => FOCUS_CATEGORIES.includes(e.category))
       .reduce((sum, e) => sum + e.duration, 0);
-    const brainTier = calculateBrainTier(totalSeconds);
-    const brainHealth = calculateBrainHealth(totalSeconds);
+    const brainTier = calculateTier(totalSeconds);
+    const brainHealth = calculateHealth(totalSeconds, focusSeconds);
     const categories = buildCategoryBreakdown(dayEntries, totalSeconds);
 
     summaries.push({
@@ -364,8 +349,8 @@ export async function updateBrainState(
     .filter((e) => FOCUS_CATEGORIES.includes(e.category))
     .reduce((sum, e) => sum + e.duration, 0);
 
-  const tier = calculateBrainTier(totalScreenTime);
-  const healthPercent = calculateBrainHealth(totalScreenTime);
+  const tier = calculateTier(totalScreenTime);
+  const healthPercent = calculateHealth(totalScreenTime, focusTime);
 
   const categoryBreakdown: Record<string, number> = {};
   for (const entry of entries) {
