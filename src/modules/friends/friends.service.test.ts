@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { prisma } from '../../config/database.js';
+import { clearAllCaches } from '../../shared/cache/index.js';
 import {
   sendFriendRequest,
   acceptFriendRequest,
@@ -48,6 +49,7 @@ describe('friends.service', () => {
     await prisma.blockedUser.deleteMany();
     await prisma.friendRequest.deleteMany();
     await prisma.friendship.deleteMany();
+    clearAllCaches();
   });
 
   afterAll(async () => {

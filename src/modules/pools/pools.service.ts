@@ -1,6 +1,7 @@
 import { prisma } from '../../config/database.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import type { PoolStatus, PoolLedgerType, TransactionType } from '@prisma/client';
+import { invalidateBalance } from '../../shared/cache/balance.js';
 
 // ---------------------------------------------------------------------------
 // Create pool
@@ -83,6 +84,7 @@ export async function createPool(
     return pool;
   });
 
+  invalidateBalance(creatorId);
   return getPool(created.id);
 }
 
@@ -158,6 +160,7 @@ export async function joinPool(poolId: string, userId: string) {
     });
   });
 
+  invalidateBalance(userId);
   return getPool(poolId);
 }
 
@@ -227,6 +230,7 @@ export async function leavePool(poolId: string, userId: string) {
     }
   });
 
+  invalidateBalance(userId);
   return getPool(poolId);
 }
 
@@ -441,6 +445,7 @@ export async function settlePool(
     });
   });
 
+  invalidateBalance(winnerUserId);
   return getPool(poolId);
 }
 

@@ -1,6 +1,7 @@
 import { prisma } from '../../config/database.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import type { TransactionType } from '@prisma/client';
+import { getCachedBalance, setCachedBalance, invalidateBalance } from '../../shared/cache/balance.js';
 
 // ---------------------------------------------------------------------------
 // Balance
@@ -9,11 +10,18 @@ import type { TransactionType } from '@prisma/client';
 export async function getBalance(
   userId: string,
 ): Promise<{ balance: number }> {
+  const cached = getCachedBalance(userId);
+  if (cached !== undefined) {
+    return { balance: cached };
+  }
+
   const wallet = await prisma.tokenWallet.findUnique({
     where: { userId },
   });
 
-  return { balance: wallet?.balance ?? 0 };
+  const balance = wallet?.balance ?? 0;
+  setCachedBalance(userId, balance);
+  return { balance };
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +118,8 @@ export async function creditTokens(
     return { balance: newBalance };
   });
 
+  invalidateBalance(userId);
+  setCachedBalance(userId, result.balance);
   return result;
 }
 

@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { prisma } from '../../config/database.js';
 import { getBalance, getTransactions, creditTokens, debitTokens } from './tokens.service.js';
+import { clearAllCaches } from '../../shared/cache/index.js';
 
 describe('tokens.service', () => {
   let testUserId: string;
 
   beforeEach(async () => {
+    clearAllCaches();
     // Create a fresh user + wallet for each test
     const user = await prisma.user.create({
       data: {

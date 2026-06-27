@@ -2,6 +2,15 @@ import { prisma } from '../../config/database.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import { isUserOnline } from '../../shared/websocket/socket.js';
 import type { FriendRequest, Friendship, User } from '@prisma/client';
+import {
+  getFriends,
+  getPending,
+  getSent,
+  setFriends,
+  setPending,
+  setSent,
+  invalidateFriends,
+} from '../../shared/cache/friends.js';
 
 // ─── Send Friend Request ─────────────────────────────────────────────────────
 
@@ -125,6 +134,8 @@ export async function acceptFriendRequest(
     where: { id: requestId },
   });
 
+  invalidateFriends(request.senderId);
+  invalidateFriends(request.receiverId);
   return friendship;
 }
 
@@ -155,6 +166,8 @@ export async function declineFriendRequest(
     data: { status: 'DECLINED' },
   });
 
+  invalidateFriends(request.senderId);
+  invalidateFriends(request.receiverId);
   return { success: true };
 }
 
@@ -181,6 +194,8 @@ export async function removeFriend(
     where: { id: friendship.id },
   });
 
+  invalidateFriends(userId);
+  invalidateFriends(friendId);
   return { success: true };
 }
 
@@ -238,6 +253,8 @@ export async function blockUser(
     },
   });
 
+  invalidateFriends(blockerId);
+  invalidateFriends(blockedId);
   return { success: true };
 }
 
@@ -269,6 +286,8 @@ export async function unblockUser(
     },
   });
 
+  invalidateFriends(blockerId);
+  invalidateFriends(blockedId);
   return { success: true };
 }
 
@@ -288,6 +307,11 @@ interface FriendWithStatus {
 }
 
 export async function getFriendsList(userId: string): Promise<FriendWithStatus[]> {
+  const cached = getFriends(userId);
+  if (cached !== undefined) {
+    return cached as FriendWithStatus[];
+  }
+
   const friendships = await prisma.friendship.findMany({
     where: {
       OR: [{ userId: userId }, { friendId: userId }],
@@ -312,7 +336,7 @@ export async function getFriendsList(userId: string): Promise<FriendWithStatus[]
     },
   });
 
-  return friendships.map((friendship) => {
+  const result = friendships.map((friendship) => {
     const isInitiator = friendship.userId === userId;
     const friendUser = isInitiator ? friendship.friend : friendship.user;
 
@@ -329,6 +353,9 @@ export async function getFriendsList(userId: string): Promise<FriendWithStatus[]
       online: isUserOnline(friendUser.id),
     };
   });
+
+  setFriends(userId, result);
+  return result;
 }
 
 // ─── Get Pending Requests ────────────────────────────────────────────────────
@@ -336,7 +363,12 @@ export async function getFriendsList(userId: string): Promise<FriendWithStatus[]
 export async function getPendingRequests(
   userId: string
 ): Promise<(FriendRequest & { sender: User })[]> {
-  return prisma.friendRequest.findMany({
+  const cached = getPending(userId);
+  if (cached !== undefined) {
+    return cached as (FriendRequest & { sender: User })[];
+  }
+
+  const requests = await prisma.friendRequest.findMany({
     where: {
       receiverId: userId,
       status: 'PENDING',
@@ -348,6 +380,9 @@ export async function getPendingRequests(
       createdAt: 'desc',
     },
   });
+
+  setPending(userId, requests);
+  return requests;
 }
 
 // ─── Get Sent Requests ───────────────────────────────────────────────────────
@@ -355,7 +390,12 @@ export async function getPendingRequests(
 export async function getSentRequests(
   userId: string
 ): Promise<(FriendRequest & { receiver: User })[]> {
-  return prisma.friendRequest.findMany({
+  const cached = getSent(userId);
+  if (cached !== undefined) {
+    return cached as (FriendRequest & { receiver: User })[];
+  }
+
+  const requests = await prisma.friendRequest.findMany({
     where: {
       senderId: userId,
       status: 'PENDING',
@@ -367,6 +407,9 @@ export async function getSentRequests(
       createdAt: 'desc',
     },
   });
+
+  setSent(userId, requests);
+  return requests;
 }
 
 // ─── Are Friends ─────────────────────────────────────────────────────────────

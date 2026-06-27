@@ -1,5 +1,6 @@
 import { prisma } from '../../config/database.js';
 import type { BrainTier, AppCategory } from '@prisma/client';
+import { getCachedBrainState } from '../../shared/cache/brainState.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -141,6 +142,14 @@ export async function searchUsers(
 export async function getBrainState(userId: string): Promise<BrainStateResult> {
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
+
+  const cached = getCachedBrainState(userId, today);
+  if (cached) {
+    // `categoryBreakdown` is serialized as JsonValue in the DB but typed as
+    // Record<AppCategory, number> | null in the public result shape. Cast at
+    // the cache boundary.
+    return cached as unknown as BrainStateResult;
+  }
 
   const brainState = await prisma.brainState.findUnique({
     where: {

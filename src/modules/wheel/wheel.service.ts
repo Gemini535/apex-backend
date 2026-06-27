@@ -1,6 +1,7 @@
 import { prisma } from '../../config/database.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import { creditTokens } from '../tokens/tokens.service.js';
+import { invalidateBalance } from '../../shared/cache/balance.js';
 import type { PowerUpType } from '@prisma/client';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -73,6 +74,7 @@ export async function spinWheel(userId: string): Promise<WheelSpinResult> {
       balanceAfter: newBalance,
     },
   });
+  invalidateBalance(userId);
 
   // Determine reward: 70% credits only, 20% power-up, 10% cosmetic
   const roll = Math.random() * 100;
