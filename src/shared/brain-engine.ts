@@ -2,6 +2,7 @@ import { prisma } from '../config/database.js';
 import { logger } from '../config/logger.js';
 import { emitToUser, getOnlineFriends } from './websocket/socket.js';
 import { evaluateStreak } from '../modules/users/streak.service.js';
+import { appEvents } from './events.js';
 import type { BrainTier } from '@prisma/client';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -98,11 +99,10 @@ export async function recalculateBrainState(userId: string): Promise<BrainStateU
     streak,
   };
 
-  // Broadcast to user's connected devices
-  emitToUser(userId, 'brain:state_update', update);
-
-  // Broadcast to online friends (visible status feature)
-  await broadcastToFriends(userId, update);
+  // Side effects (WebSocket broadcast, streak evaluation, etc.) are driven by
+  // listeners registered in src/shared/events.listeners.ts — this engine only
+  // needs to emit the event.
+  appEvents.emit('brain:updated', update);
 
   logger.debug(
     { userId, tier, healthPercent, totalScreenTime },
@@ -114,8 +114,9 @@ export async function recalculateBrainState(userId: string): Promise<BrainStateU
 
 /**
  * Notifies friends about brain state changes (for visible status mode).
+ * Exported so event listeners can call it; not part of the engine's core.
  */
-async function broadcastToFriends(
+export async function broadcastToFriends(
   userId: string,
   update: BrainStateUpdate
 ): Promise<void> {
