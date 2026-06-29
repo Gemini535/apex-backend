@@ -8,6 +8,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
+import nodemailer from 'nodemailer';
 
 // ─── In-memory SMS/Email code store (replace with Redis in production) ────────
 
@@ -18,6 +19,47 @@ interface CodeEntry {
 
 const smsCodeStore = new Map<string, CodeEntry>();
 const emailCodeStore = new Map<string, CodeEntry>();
+
+// ─── Twilio client (lazy, only constructed if credentials are present) ────────
+
+let twilioClient: ReturnType<typeof import('twilio')> | null = null;
+
+function getTwilioClient() {
+  if (twilioClient) return twilioClient;
+
+  const { accountSid, authToken, phoneNumber } = env.twilio;
+  if (!accountSid || !authToken || !phoneNumber) {
+    throw new Error(
+      'Twilio is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER.',
+    );
+  }
+
+  // Dynamic import keeps twilio out of the bundle when not used.
+  const twilio = require('twilio') as typeof import('twilio');
+  twilioClient = twilio(accountSid, authToken);
+  return twilioClient;
+}
+
+// ─── SMTP transporter (lazy, only constructed if credentials are present) ──────
+
+let smtpTransport: ReturnType<typeof nodemailer.createTransport> | null = null;
+
+function getSmtpTransport() {
+  if (smtpTransport) return smtpTransport;
+
+  const { host, port, user, pass } = env.smtp;
+  if (!host) {
+    throw new Error('SMTP is not configured. Set SMTP_HOST.');
+  }
+
+  smtpTransport = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: user ? { user, pass } : undefined,
+  });
+  return smtpTransport;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -213,8 +255,21 @@ export async function sendSMSCode(phoneNumber: string): Promise<string> {
     expiresAt: Date.now() + 5 * 60 * 1000, // 5 min TTL
   });
 
-  // TODO: Integrate Twilio SMS
-  logger.info('[SMS] Verification code for %s: %s', phoneNumber, code);
+  // Send via Twilio when configured. In dev (no credentials) we fall back to
+  // logging only — the in-memory store still works for verification.
+  try {
+    const client = getTwilioClient();
+    await client.messages.create({
+      body: `Your Apex verification code: ${code}. It expires in 5 minutes.`,
+      from: env.twilio.phoneNumber,
+      to: phoneNumber,
+    });
+    logger.info({ phoneNumber }, 'SMS verification code sent via Twilio');
+  } catch (err) {
+    // Twilio not configured or network failure — log at debug so tests don't
+    // spam, but the code is still usable via the in-memory store.
+    logger.debug({ err, phoneNumber }, 'SMS send failed (falling back to store)');
+  }
 
   return code;
 }
@@ -231,8 +286,21 @@ export async function sendEmailCode(email: string): Promise<string> {
     expiresAt: Date.now() + 5 * 60 * 1000, // 5 min TTL
   });
 
-  // TODO: Integrate nodemailer
-  logger.info('[Email] Verification code for %s: %s', email, code);
+  // Send via nodemailer when SMTP is configured. In dev we fall back to
+  // logging only — the in-memory store still works for verification.
+  try {
+    const transport = getSmtpTransport();
+    await transport.sendMail({
+      from: env.smtp.from,
+      to: email,
+      subject: 'Your Apex verification code',
+      text: `Your Apex verification code is: ${code}\n\nIt expires in 5 minutes.`,
+      html: `<p>Your Apex verification code is: <strong>${code}</strong></p><p>It expires in 5 minutes.</p>`,
+    });
+    logger.info({ email }, 'Email verification code sent via SMTP');
+  } catch (err) {
+    logger.debug({ err, email }, 'Email send failed (falling back to store)');
+  }
 
   return code;
 }

@@ -253,18 +253,45 @@ export async function createWithdrawal(
   setIdempotency(idempotencyKey, { status: 'pending', createdAt: Date.now() });
 
   try {
-    // Debit tokens first (inside its own transaction)
+    // Debit tokens first (inside its own transaction). This ensures the user
+    // can't double-spend while the payout is in flight.
     await debitTokens(userId, tokenAmount, 'SPENT', 'Withdrawal to bank', idempotencyKey);
 
-    // Note: Actual Stripe Connect transfer requires the user to have a connected
-    // Stripe account. For now, we record the withdrawal and process it manually.
-    // In production, you'd use stripe.transfers.create() with a connected account.
+    // Look up the user's connected Stripe account. Without one, the payout
+    // cannot be sent — surface a clear error instead of silently failing.
+    const paymentAccount = await prisma.paymentAccount.findUnique({
+      where: { userId },
+    });
+
+    if (!paymentAccount?.stripeConnectedAccountId) {
+      throw new AppError(
+        'No connected Stripe account. Complete onboarding before withdrawing.',
+        400,
+      );
+    }
+
+    // Create a real Stripe Connect transfer to the user's connected account.
+    // The amount is in cents (1 token = 1 cent). The transfer is denominated in
+    // the same currency as the Stripe account (typically usd).
+    const transfer = await stripe.transfers.create(
+      {
+        amount: tokenAmount,
+        currency: 'usd',
+        destination: paymentAccount.stripeConnectedAccountId,
+        metadata: {
+          userId,
+          tokenAmount: String(tokenAmount),
+          idempotencyKey,
+        },
+      },
+      { idempotencyKey },
+    );
 
     const result: WithdrawResult = {
-      transferId: `manual_${Date.now()}_${userId.slice(0, 8)}`,
+      transferId: transfer.id,
       amount: tokenAmount,
       currency: 'usd',
-      status: 'pending_manual_processing',
+      status: 'pending',
     };
 
     setIdempotency(idempotencyKey, {
@@ -273,7 +300,10 @@ export async function createWithdrawal(
       createdAt: Date.now(),
     });
 
-    logger.info({ userId, tokenAmount }, 'Withdrawal recorded for manual processing');
+    logger.info(
+      { userId, tokenAmount, transferId: transfer.id },
+      'Withdrawal sent via Stripe Connect',
+    );
 
     return result;
   } catch (err) {
@@ -327,11 +357,38 @@ export async function handleWebhook(
 
     case 'charge.refunded': {
       const charge = event.data.object as Stripe.Charge;
-      logger.info(
-        { chargeId: charge.id, amountRefunded: charge.amount_refunded },
-        'Stripe charge refunded'
-      );
-      // TODO: Handle refund — reverse tokens if needed
+
+      // The charge may be linked to a token deposit via our metadata. If so,
+      // reverse the tokens that were credited for this charge — the user is
+      // getting their money back, so the tokens must be clawed back.
+      const paymentIntentId = charge.payment_intent as string | null;
+      if (paymentIntentId) {
+        const tx = await prisma.tokenTransaction.findFirst({
+          where: { referenceId: paymentIntentId, type: 'EARNED' },
+        });
+
+        if (tx) {
+          // Reverse the credit: debit the same amount from the wallet.
+          await debitTokens(
+            // The wallet belongs to the user who received the credit.
+            // Look up the wallet via the transaction's wallet → user.
+            (await prisma.tokenWallet.findUnique({ where: { id: tx.walletId } }))!.userId,
+            Math.abs(tx.amount),
+            'SPENT',
+            `Refund reversal for charge ${charge.id}`,
+            charge.id,
+          );
+          logger.info(
+            { chargeId: charge.id, userId: tx.walletId, amount: Math.abs(tx.amount) },
+            'Tokens reversed for refunded charge',
+          );
+        }
+      } else {
+        logger.info(
+          { chargeId: charge.id, amountRefunded: charge.amount_refunded },
+          'Stripe charge refunded (no linked transaction to reverse)',
+        );
+      }
       break;
     }
 
