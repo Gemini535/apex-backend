@@ -15,12 +15,18 @@ Built with **Node.js + TypeScript + Express + PostgreSQL (Prisma) + Socket.IO**.
 | **Auth** | Email/password, Apple & Google OAuth, TOTP/SMS/Email 2FA, refresh-token rotation, session management, password reset, email verification |
 | **Users** | Profiles, brain state (tier + health from screen time), aggregated stats, search |
 | **Friends** | Requests, accept/decline, block, real-time online presence over WebSocket |
-| **Tokens & Payments** | Token wallet, transaction history, Stripe deposits & withdrawals (1¢ = 1 token) |
+| **Tokens** | Wallet balance, transaction history |
+| **Payments** | Stripe deposits & withdrawals (1¢ = 1 token), real Stripe Connect payouts |
 | **Pools** | Create/join/leave/settle cash pools with atomic transactions and an append-only audit ledger |
-| **Screen Time** | Batch upload from device, daily/range summaries, per-app & per-category breakdowns |
-| **Power-Ups & Cosmetics** | Token wheel (gacha), 6 power-ups, Cortex Vault cosmetics |
-| **Commitment Contracts** | Self-imposed goal contracts with a token stake |
+| **Screen Time** | Batch upload from device, daily/range summaries, per-app & per-category breakdowns, timezone-aware day boundaries |
+| **Wheel** | Token wheel (gacha) with weighted drops |
+| **Power-Ups** | 6 power-ups, inventory + activation |
+| **Cosmetics** | Cortex Vault cosmetics, equip |
+| **Commitment Contracts** | Self-imposed goal contracts with a token stake, hourly resolution job |
+| **Push Notifications** | iOS push via APNs (.p8 token auth) for brain updates, friend activity, contract outcomes, and threshold alerts |
 | **Real-time** | WebSocket broadcasts for brain state, friend presence, and screen time |
+| **Job Queue** | pg-boss (Postgres-backed) for brain recalc, streak decay, contract resolution, cache cleanup |
+| **Cache** | In-memory LRU cache for brain state, friend lists, and token balances |
 
 ---
 
@@ -33,6 +39,7 @@ Built with **Node.js + TypeScript + Express + PostgreSQL (Prisma) + Socket.IO**.
 Optional, for the features that use them:
 - Stripe account (for payments)
 - Apple Developer account (for Sign-In)
+- Apple Developer account with APNs Auth Key (for push notifications)
 - Google Cloud project (for Google OAuth)
 - Twilio account (for SMS 2FA)
 - SMTP server (for email 2FA & notifications)
@@ -120,9 +127,15 @@ ones:
 | `GOOGLE_CLIENT_ID` | For Google OAuth | Google OAuth client ID |
 | `TWILIO_ACCOUNT_SID` | For SMS 2FA | Twilio account SID |
 | `SMTP_HOST` | For email | SMTP server host |
+| `APN_KEY_ID` | For push notifications | APNs auth key ID (10 chars) |
+| `APN_TEAM_ID` | For push notifications | Apple Developer Team ID |
+| `APN_BUNDLE_ID` | For push notifications | App bundle ID (default `com.apex.app`) |
+| `APN_KEY_PATH` | For push notifications | Path to the .p8 private key file |
+| `APN_PRODUCTION` | No (default `false`) | `true` for production APNs, `false` for sandbox |
 | `RATE_LIMIT_WINDOW_MS` | No (default 900000) | General rate-limit window |
 | `RATE_LIMIT_MAX` | No (default 100) | General rate-limit max requests |
 | `FRONTEND_URL` | No | Production CORS origin |
+| `CONTRACT_GOAL_THRESHOLD` | No (default `0.6`) | Fraction of days a user must hit their target to pass a commitment |
 
 ---
 
@@ -206,6 +219,10 @@ Quick reference:
 | POST | `/cosmetics/equip` | ✓ | Equip cosmetic |
 | GET/POST | `/commitments` | ✓ | List / create contracts |
 | POST | `/commitments/:id/cancel` | ✓ | Cancel contract |
+| POST | `/devices/register` | ✓ | Register a push notification device token |
+| GET | `/devices` | ✓ | List registered devices |
+| PUT | `/devices` | ✓ | Update a device token |
+| DELETE | `/devices/:token` | ✓ | Unregister a device |
 
 ---
 
@@ -227,6 +244,8 @@ This backend includes several production safeguards out of the box:
 - **JWT secret validation** — the server refuses to start with placeholder or
   too-short secrets, and requires the access and refresh secrets to differ.
 - **CORS** — wide-open in development, locked to `FRONTEND_URL` in production.
+- **Durable caching** — SMS/email codes and Stripe idempotency keys persist in
+  Postgres, surviving restarts and working across horizontally scaled instances.
 
 ---
 
@@ -242,22 +261,46 @@ src/
 │   └── logger.ts           # Pino logger
 ├── middleware/
 │   ├── auth.ts             # JWT verification
+│   ├── auth.test.ts        # Auth middleware tests
+│   ├── docs.ts             # Swagger UI + OpenAPI JSON
 │   ├── errorHandler.ts     # Global error handler + AppError + request IDs
 │   ├── health.ts           # DB-probing health check
 │   ├── rateLimiter.ts      # General, auth, and wheel limiters
 │   ├── sanitize.ts         # Global input sanitization
-│   ├── validate.ts         # express-validator wrapper
-│   └── docs.ts             # Swagger UI + OpenAPI JSON
+│   └── validate.ts         # express-validator wrapper
 ├── modules/
 │   ├── auth/               # Registration, login, 2FA, sessions, password reset
-│   ├── users/              # Profiles, brain state, stats
+│   ├── users/              # Profiles, brain state, stats, streaks
 │   ├── friends/            # Friend graph + blocking
-│   ├── payments/           # Tokens, Stripe, pools
-│   ├── powerups/           # Wheel, power-ups, cosmetics, contracts
+│   ├── tokens/             # Wallet balance, transaction history
+│   ├── payments/           # Stripe deposits, withdrawals, webhooks
+│   ├── pools/              # Cash pools: create, join, settle, ledger
+│   ├── wheel/              # Token wheel (gacha)
+│   ├── powerups/           # Power-up inventory + activation
+│   ├── cosmetics/          # Cortex Vault cosmetics
+│   ├── commitments/        # Commitment contracts with stakes
+│   ├── devices/            # Push notification device token registration
+│   ├── notifications/      # APNs push notification sender
 │   └── screentime/         # Upload + aggregation
 ├── shared/
 │   ├── brain-engine.ts     # Real-time brain state recalculation
+│   ├── events.ts           # Typed internal event emitter
+│   ├── events.listeners.ts # Side-effect listeners (WebSocket, push, streak)
 │   ├── openapi.ts          # OpenAPI 3.0 spec
+│   ├── tz.ts               # Timezone-aware day boundaries
+│   ├── cache/
+│   │   ├── store.ts        # Generic LRU+TTL cache
+│   │   ├── durable.ts      # Postgres-backed durable cache (KV + cleanup)
+│   │   ├── brainState.ts   # Brain state cache
+│   │   ├── friends.ts      # Friend list cache
+│   │   ├── balance.ts      # Token balance cache
+│   │   └── index.ts        # Cache barrel export
+│   ├── queue/
+│   │   ├── boss.ts         # pg-boss singleton + startup
+│   │   ├── jobs.ts         # Job name constants + payload types
+│   │   ├── handlers.ts     # Job handlers
+│   │   ├── evaluate-contract.ts  # Single-contract resolution logic
+│   │   └── evaluate-contract.test.ts
 │   ├── types/              # Shared TypeScript interfaces
 │   └── websocket/
 │       └── socket.ts       # Socket.IO setup + presence
@@ -277,6 +320,9 @@ prisma/
 - **Database:** PostgreSQL via Prisma ORM
 - **Real-time:** Socket.IO with JWT-authenticated connections
 - **Auth:** JWT (access + refresh), bcrypt, TOTP (speakeasy), OAuth
-- **Payments:** Stripe (PaymentIntent + webhooks)
+- **Payments:** Stripe (PaymentIntent + webhooks + Connect payouts)
+- **Push Notifications:** APNs via HTTP/2 with .p8 token-based auth
+- **Job Queue:** pg-boss (Postgres-backed, no Redis)
+- **Cache:** In-memory LRU + Postgres-backed durable KV
 - **Logging:** Pino
 - **Testing:** Vitest + Supertest
