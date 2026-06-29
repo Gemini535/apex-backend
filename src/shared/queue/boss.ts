@@ -19,12 +19,11 @@ import { logger } from '../../config/logger.js';
 import { JOBS } from './jobs.js';
 import {
   handleBrainRecalc,
-  handleContractDeadlineEval,
+  handleContractResolveAll,
   handleStreakDecay,
 } from './handlers.js';
 import type {
   BrainRecalcPayload,
-  ContractDeadlineEvalPayload,
   StreakDecayPayload,
 } from './jobs.js';
 
@@ -64,19 +63,15 @@ export async function startBoss(): Promise<PgBoss> {
 
     // ─── Batch sweep jobs ────────────────────────────────────────────────
     await instance.subscribe(
-      JOBS.DEADLINE_EVAL,
+      JOBS.CONTRACT_RESOLVE_ALL,
       { batchSize: 1 },
-      (job: Job<ContractDeadlineEvalPayload>) => handleContractDeadlineEval(job.data),
-    );
-    await instance.subscribe(
-      JOBS.DEADLINE_EVAL_ALL,
-      { batchSize: 1 },
-      (job: Job<ContractDeadlineEvalPayload>) => handleContractDeadlineEval(job.data),
+      () => handleContractResolveAll(),
     );
 
     // ─── Cron schedules ──────────────────────────────────────────────────
+    // Hourly sweep: evaluate and resolve overdue commitment contracts.
     if (env.nodeEnv !== 'test') {
-      await instance.schedule(JOBS.DEADLINE_EVAL_ALL, '*/15 * * * *');
+      await instance.schedule(JOBS.CONTRACT_RESOLVE_ALL, '0 * * * *');
     }
 
     boss = instance;

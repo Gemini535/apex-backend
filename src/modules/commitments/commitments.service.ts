@@ -1,11 +1,12 @@
 import { prisma } from '../../config/database.js';
 import { AppError } from '../../middleware/errorHandler.js';
+import { debitTokens } from '../tokens/tokens.service.js';
 
 // ─── Deadline Evaluation ───────────────────────────────────────────────────────
 
 /**
  * Transitions any ACTIVE commitment contracts whose deadline has passed to
- * FAILED. Called by the queue job `handleContractDeadlineEval`, but exposed
+ * FORFEITED. Called by the queue job `handleContractResolveAll`, but exposed
  * separately so it can also be triggered inline (e.g., in a manual
  * administration endpoint).
  */
@@ -45,18 +46,60 @@ export async function createContract(
     throw new AppError('End date must be after start date', 400);
   }
 
-  return prisma.commitmentContract.create({
-    data: {
-      userId,
-      name: data.name,
-      description: data.description,
-      pledgeAmount: data.pledgeAmountCents,
-      targetScreenTime: data.targetScreenTime,
-      startDate: data.startDate,
-      endDate: data.endDate,
-      charityName: data.charityName,
-      status: 'ACTIVE',
-    },
+  // Debit the pledge up front. The debit is the "stake" — if the contract
+  // completes we credit it back; if it's forfeited the debit stands.
+  return prisma.$transaction(async (tx) => {
+    const wallet = await tx.tokenWallet.findUnique({ where: { userId } });
+    if (!wallet) {
+      throw new AppError('Token wallet not found', 404);
+    }
+    if (wallet.balance < data.pledgeAmountCents) {
+      throw new AppError('Insufficient token balance for pledge', 400);
+    }
+
+    const newBalance = wallet.balance - data.pledgeAmountCents;
+
+    await tx.tokenWallet.update({
+      where: { id: wallet.id },
+      data: { balance: newBalance },
+    });
+
+    await tx.tokenTransaction.create({
+      data: {
+        walletId: wallet.id,
+        amount: -data.pledgeAmountCents,
+        type: 'CONTRACT_STAKE',
+        description: `Stake for commitment: ${data.name}`,
+        balanceAfter: newBalance,
+        referenceId: null, // contract id not known yet; back-filled below
+      },
+    });
+
+    const contract = await tx.commitmentContract.create({
+      data: {
+        userId,
+        name: data.name,
+        description: data.description,
+        pledgeAmount: data.pledgeAmountCents,
+        targetScreenTime: data.targetScreenTime,
+        startDate: data.startDate,
+        endDate: data.endDate,
+        charityName: data.charityName,
+        status: 'ACTIVE',
+      },
+    });
+
+    // Back-fill the stake transaction with the contract id for auditability.
+    await tx.tokenTransaction.updateMany({
+      where: {
+        walletId: wallet.id,
+        type: 'CONTRACT_STAKE',
+        referenceId: null,
+      },
+      data: { referenceId: contract.id },
+    });
+
+    return contract;
   });
 }
 

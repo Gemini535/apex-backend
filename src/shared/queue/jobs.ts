@@ -11,15 +11,11 @@ export const JOBS = {
   BRAIN_RECALC: 'brain-recalc',
 
   /**
-   * One-shot job: evaluate a single user's commitment contracts and flip any
-   * ACTIVE past-deadline row to FAILED.
+   * Hourly batch job: sweep every ACTIVE contract whose deadline has passed,
+   * evaluate whether the user met their screen-time goal, and resolve the
+   * contract (COMPLETED → credit pledge back; FORFEITED → debit stands).
    */
-  DEADLINE_EVAL: 'contract-deadline-eval',
-
-  /**
-   * Batch job: sweep every active contract and transition those past deadline.
-   */
-  DEADLINE_EVAL_ALL: 'contract-deadline-eval-all',
+  CONTRACT_RESOLVE_ALL: 'contract-resolve-all',
 
   /** Re-evaluate one user's streak from their recent brain state history. */
   STREAK_DECAY: 'streak-decay',
@@ -29,11 +25,6 @@ export type JobName = (typeof JOBS)[keyof typeof JOBS];
 
 export interface BrainRecalcPayload {
   userId: string;
-}
-
-export interface ContractDeadlineEvalPayload {
-  /** When provided, only this user's contracts are evaluated; otherwise sweep everyone. */
-  userId?: string;
 }
 
 export interface StreakDecayPayload {

@@ -9,68 +9,72 @@
  * hold locks for seconds.
  */
 
-import type { BrainRecalcPayload, ContractDeadlineEvalPayload, StreakDecayPayload } from './jobs.js';
+import type { BrainRecalcPayload, StreakDecayPayload } from './jobs.js';
 import { recalculateBrainState } from '../brain-engine.js';
 import { prisma } from '../../config/database.js';
 import { logger } from '../../config/logger.js';
+import { invalidateBrainState } from '../cache/brainState.js';
+import { evaluateContract } from './evaluate-contract.js';
 
 // ─── Brain recalc ─────────────────────────────────────────────────────────────
 
 export async function handleBrainRecalc(payload: BrainRecalcPayload): Promise<void> {
   await recalculateBrainState(payload.userId);
+  // The DB upsert is done inside recalculateBrainState; invalidate the cache so
+  // the next read repopulates with fresh data.
+  invalidateBrainState(payload.userId);
 }
 
-// ─── Contract deadline evaluation ──────────────────────────────────────────────
+// ─── Contract resolution sweep ─────────────────────────────────────────────────
 
 /**
- * Flips ACTIVE contracts whose deadline has passed to FAILED. If `userId` is
- * provided, only that user's contracts are evaluated; otherwise the function
- * sweeps every outstanding contract.
- *
- * The update is chunked and runs in short transactions so concurrent HTTP pool
- * users do not see long-held locks.
+ * Sweep every overdue ACTIVE commitment contract and resolve each one via
+ * `evaluateContract`. Chunks work to avoid long-held locks and batched DB
+ * round-trips. Each contract resolution is its own transaction, so one
+ * failure does not roll back the others.
  */
-export async function handleContractDeadlineEval(payload: ContractDeadlineEvalPayload): Promise<void> {
+export async function handleContractResolveAll(): Promise<void> {
   const now = new Date();
-
-  const where = {
-    status: 'ACTIVE' as const,
-    endDate: { lte: now },
-    ...(payload.userId ? { userId: payload.userId } : {}),
-  };
-
-  // Paginate so we never lock thousands of rows in one transaction.
-  const pageSize = 200;
+  const pageSize = 50;
   let cursor: string | undefined;
-  let updatedTotal = 0;
+  let processedTotal = 0;
 
   for (;;) {
     const contracts = await prisma.commitmentContract.findMany({
-      where,
+      where: {
+        status: 'ACTIVE',
+        endDate: { lte: now },
+      },
       select: { id: true },
       take: pageSize,
       ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+      orderBy: { id: 'asc' },
     });
 
     if (contracts.length === 0) break;
 
-    const ids = contracts.map((c) => c.id);
+    for (const contract of contracts) {
+      try {
+        const result = await evaluateContract(contract.id);
+        if (result) {
+          processedTotal += 1;
+          logger.debug(
+            { contractId: contract.id, status: result.status },
+            'Contract resolved by hourly job',
+          );
+        }
+      } catch (err) {
+        // Per-contract failures must not abort the sweep.
+        logger.error({ err, contractId: contract.id }, 'Failed to resolve contract');
+      }
+    }
 
-    const result = await prisma.commitmentContract.updateMany({
-      where: { id: { in: ids } },
-      data: { status: 'FORFEITED' },
-    });
-
-    updatedTotal += result.count;
     if (contracts.length < pageSize) break;
-    cursor = ids[ids.length - 1];
+    cursor = contracts[contracts.length - 1].id;
   }
 
-  if (updatedTotal > 0) {
-    logger.info(
-      { count: updatedTotal, userId: payload.userId ?? 'all' },
-      'Commitment contracts marked FORFEITED past deadline',
-    );
+  if (processedTotal > 0) {
+    logger.info({ count: processedTotal }, 'Hourly contract sweep resolved contracts');
   }
 }
 
