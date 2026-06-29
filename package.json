@@ -24,6 +24,8 @@
     "apple-signin-auth": "^1.7.8",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
+    "date-fns": "^3.6.0",
+    "date-fns-tz": "^3.2.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
@@ -32,6 +34,7 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^6.9.15",
+    "pg-boss": "^6.2.2",
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.0",
     "qrcode": "^1.5.4",
@@ -49,13 +52,13 @@
     "@types/nodemailer": "^6.4.15",
     "@types/qrcode": "^1.5.5",
     "@types/speakeasy": "^2.0.10",
-    "@types/uuid": "^10.0.0",
-    "prisma": "^6.0.0",
     "@types/supertest": "^6.0.2",
+    "@types/uuid": "^10.0.0",
+    "@vitest/coverage-v8": "^2.1.0",
+    "prisma": "^6.0.0",
     "supertest": "^7.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4",
-    "vitest": "^2.1.0",
-    "@vitest/coverage-v8": "^2.1.0"
+    "vitest": "^2.1.0"
   }
 }
