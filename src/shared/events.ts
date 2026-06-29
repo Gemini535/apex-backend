@@ -12,11 +12,27 @@
 
 import { EventEmitter } from 'node:events';
 import type { BrainStateUpdate } from './brain-engine.js';
+import type { BrainTier } from '@prisma/client';
 
 // ─── Event map ────────────────────────────────────────────────────────────────
 
 export type AppEvents = {
   'brain:updated': [update: BrainStateUpdate];
+  'contract:resolved': [payload: {
+    userId: string;
+    contractId: string;
+    name: string;
+    status: 'COMPLETED' | 'FORFEITED';
+    pledgeAmount: number;
+    daysHit: number;
+    daysTotal: number;
+  }];
+  'screentime:threshold': [payload: {
+    userId: string;
+    tier: BrainTier;
+    category: string;
+    percentUsed: number;
+  }];
 };
 
 /**

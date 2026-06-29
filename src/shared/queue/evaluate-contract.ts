@@ -24,6 +24,7 @@ import { logger } from '../../config/logger.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import { getRangeData } from '../../modules/screentime/screentime.service.js';
 import { creditTokens } from '../../modules/tokens/tokens.service.js';
+import { appEvents } from '../events.js';
 
 /** Fraction of days the user must hit their target to "pass" the contract. */
 export function goalThreshold(): number {
@@ -165,14 +166,26 @@ export async function evaluateContract(
       );
     }
 
-    return {
+    const resolution = {
       contractId,
-      status: met ? 'COMPLETED' : 'FORFEITED',
+      status: (met ? 'COMPLETED' : 'FORFEITED') as 'COMPLETED' | 'FORFEITED',
       daysTotal,
       daysHit,
       hitRate,
       pledgeAmount: contract.pledgeAmount,
     };
+
+    // Emit the event so push notification listeners fire. Fire-and-forget —
+    // the resolution already committed in this transaction.
+    const { contractId: _, ...rest } = resolution;
+    appEvents.emit('contract:resolved', {
+      userId: contract.userId,
+      contractId,
+      name: contract.name,
+      ...rest,
+    });
+
+    return resolution;
   });
 }
 

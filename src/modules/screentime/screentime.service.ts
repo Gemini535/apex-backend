@@ -1,9 +1,11 @@
 import { prisma } from '../../config/database.js';
 import type { AppCategory, BrainTier } from '@prisma/client';
 import { calculateTier, calculateHealth } from '../../shared/brain-engine.js';
+import { logger } from '../../config/logger.js';
 import { enqueue } from '../../shared/queue/boss.js';
 import { JOBS } from '../../shared/queue/jobs.js';
 import { getUtcDayBoundary, resolveTimezone } from '../../shared/tz.js';
+import { appEvents } from '../../shared/events.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -125,6 +127,44 @@ export async function uploadBatch(
 
   // Recalculate brain state after new data (fire and forget via queue)
   await enqueue(JOBS.BRAIN_RECALC, { userId });
+
+  // Detect threshold breach: if the new entries push the user into SLIME or
+  // GRAY_VOID, emit a threshold event so push notifications fire.
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { timezone: true },
+    });
+    const { dayStart, dayEnd } = getUtcDayBoundary(
+      resolveTimezone(user?.timezone),
+      new Date(),
+    );
+    const todaysEntries = await prisma.screenTimeEntry.findMany({
+      where: { userId, startedAt: { gte: dayStart, lte: dayEnd } },
+    });
+    const totalSeconds = todaysEntries.reduce((sum, e) => sum + e.duration, 0);
+    const tier = calculateTier(totalSeconds);
+
+    // Threshold = SLIME or worse. PRISTINE and FOG are "healthy" tiers.
+    if (tier === 'SLIME' || tier === 'GRAY_VOID') {
+      // Find the most-used category for context.
+      const categoryMap = new Map<string, number>();
+      for (const e of todaysEntries) {
+        categoryMap.set(e.category, (categoryMap.get(e.category) ?? 0) + e.duration);
+      }
+      const topCategory = [...categoryMap.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'UNKNOWN';
+
+      appEvents.emit('screentime:threshold', {
+        userId,
+        tier,
+        category: topCategory,
+        percentUsed: Math.min(100, Math.round((totalSeconds / (8 * 3600)) * 100)),
+      });
+    }
+  } catch (err) {
+    // Threshold detection must never break the upload response.
+    logger.error({ err, userId }, 'Threshold detection failed');
+  }
 
   return { count: result.count };
 }

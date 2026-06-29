@@ -114,6 +114,14 @@ export const env = {
     webhookSecret: getEnv('STRIPE_WEBHOOK_SECRET', 'whsec_placeholder'),
   },
 
+  apns: {
+    keyId:      getEnv('APN_KEY_ID', ''),
+    teamId:     getEnv('APN_TEAM_ID', ''),
+    bundleId:   getEnv('APN_BUNDLE_ID', 'com.apex.app'),
+    keyPath:    getEnv('APN_KEY_PATH', ''),
+    production: getEnv('APN_PRODUCTION', 'false') === 'true',
+  },
+
   rateLimit: {
     windowMs: parseInt(getEnv('RATE_LIMIT_WINDOW_MS', '900000'), 10),
     max: parseInt(getEnv('RATE_LIMIT_MAX', '100'), 10),

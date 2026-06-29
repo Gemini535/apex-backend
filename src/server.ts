@@ -4,7 +4,7 @@ import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 import { initializeSocket } from './shared/websocket/socket.js';
 import { startBoss, stopBoss } from './shared/queue/boss.js';
-import { registerBrainStateListeners } from './shared/events.listeners.js';
+import { registerAllListeners } from './shared/events.listeners.js';
 
 const server = http.createServer(app);
 
@@ -16,9 +16,10 @@ const io = initializeSocket(server);
 // the server still runs -- jobs just won't process until the queue recovers.
 await startBoss();
 
-// Wire brain-state side effects (WebSocket broadcast + streak evaluation) to
-// the event emitter. Must be done before any recalculation runs.
-registerBrainStateListeners();
+// Wire all event-driven side effects (WebSocket broadcasts, push
+// notifications, streak evaluation) to the event emitter. Must be done
+// before any recalculation runs.
+registerAllListeners();
 
 const PORT = env.port;
 

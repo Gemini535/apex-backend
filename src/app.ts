@@ -31,6 +31,9 @@ import commitmentsRouter from './modules/commitments/commitments.routes.js';
 // Route modules — screen time
 import screentimeRouter from './modules/screentime/screentime.routes.js';
 
+// Route modules — devices (push notification tokens)
+import devicesRouter from './modules/devices/devices.routes.js';
+
 const app = express();
 
 // ─── Stripe webhook (must be BEFORE express.json() for raw body) ─────────────
@@ -93,6 +96,9 @@ app.use('/api/commitments', commitmentsRouter);
 
 // ─── Screen Time ──────────────────────────────────────────────────────────
 app.use('/api/screentime', screentimeRouter);
+
+// ─── Devices (push notification tokens) ──────────────────────────────────
+app.use('/api/devices', devicesRouter);
 
 // ─── 404 Handler ───────────────────────────────────────────────────────────
 

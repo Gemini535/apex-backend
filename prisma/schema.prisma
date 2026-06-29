@@ -57,6 +57,19 @@ model User {
   userCosmetics        UserCosmetic[]
   commitmentContracts  CommitmentContract[]
   wheelSpins           WheelSpin[]
+  devices              Device[]
+}
+
+model Device {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  platform  String   @default("ios")
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("devices")
 }
 
 model Session {
