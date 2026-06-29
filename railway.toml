@@ -1,0 +1,33 @@
+# Railway deployment configuration for Apex backend.
+#
+# Stack: Node.js + PostgreSQL (no Redis — all caching and job queuing uses
+# Postgres via the cache_entries table and pg-boss).
+#
+# Required env vars (set in Railway dashboard or via `railway variables`):
+#   DATABASE_URL         — Postgres connection string (auto-provided by Railway
+#                          Postgres plugin; do not set manually)
+#   JWT_SECRET           — min 256-bit random secret for access tokens
+#   JWT_REFRESH_SECRET   — min 256-bit random secret, MUST differ from JWT_SECRET
+#   STRIPE_SECRET_KEY    — Stripe secret key (sk_live_...)
+#   STRIPE_WEBHOOK_SECRET — Stripe webhook signing secret (whsec_...)
+#   FRONTEND_URL         — production frontend origin for CORS
+#
+# Optional env vars (have safe defaults):
+#   PORT                 — defaults to 3000
+#   NODE_ENV             — defaults to "production" on Railway
+#   TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER
+#   SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_FROM
+#   APPLE_CLIENT_ID / APPLE_TEAM_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY_PATH
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+#   CONTRACT_GOAL_THRESHOLD — defaults to 0.6
+
+[build]
+builder = "nixpacks"
+buildCommand = "npm run build && npm run prisma:generate"
+
+[deploy]
+startCommand = "node dist/src/server.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
