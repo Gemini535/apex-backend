@@ -533,7 +533,7 @@ export async function verifyAndEnable2FASMS(
       throw new AppError('No phone number set up for SMS 2FA', 400);
     }
 
-    const isValid = verifySMSCode(twoFactor.smsPhoneNumber, code);
+    const isValid = await verifySMSCode(twoFactor.smsPhoneNumber, code);
     if (!isValid) {
       throw new AppError('Invalid or expired SMS code', 400);
     }
@@ -578,7 +578,7 @@ export async function verifyAndEnable2FAEmail(
     const { email } = req.user!;
     const { code } = req.body as { code: string };
 
-    const isValid = verifyEmailCode(email, code);
+    const isValid = await verifyEmailCode(email, code);
     if (!isValid) {
       throw new AppError('Invalid or expired email code', 400);
     }

@@ -422,6 +422,21 @@ enum ContractStatus {
   CANCELLED
 }
 
+// ─── Durable cache (Postgres-backed KV with TTL) ─────────────────────────────
+
+/// Generic key-value cache backed by Postgres. Replaces in-memory Maps that
+/// evaporate on restart. Used for SMS/email verification codes and Stripe
+/// idempotency keys. Rows are cleaned up by the `cache-cleanup` pg-boss job.
+model CacheEntry {
+  key        String   @id
+  value      String   // JSON-serialized value
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("cache_entries")
+}
+
 // ─── Token Wheel (Gacha) ─────────────────────────────────────────────────────
 
 model WheelSpin {

@@ -19,6 +19,12 @@ export const JOBS = {
 
   /** Re-evaluate one user's streak from their recent brain state history. */
   STREAK_DECAY: 'streak-decay',
+
+  /**
+   * Periodic maintenance: delete expired rows from the `cache_entries` table so
+   * it doesn't grow unbounded.
+   */
+  CACHE_CLEANUP: 'cache-cleanup',
 } as const;
 
 export type JobName = (typeof JOBS)[keyof typeof JOBS];

@@ -4,6 +4,7 @@ import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import { creditTokens, debitTokens } from '../tokens/tokens.service.js';
+import { cacheGet, cacheSet } from '../../shared/cache/durable.js';
 
 // ─── Stripe client ───────────────────────────────────────────────────────────
 
@@ -11,7 +12,7 @@ export const stripe = new Stripe(env.stripe.secretKey, {
   apiVersion: '2024-06-20',
 });
 
-// ─── Idempotency store (use Redis in production) ─────────────────────────────
+// ─── Idempotency store (Postgres-backed) ─────────────────────────────────────
 
 interface IdempotencyEntry {
   status: 'pending' | 'completed' | 'failed';
@@ -20,31 +21,20 @@ interface IdempotencyEntry {
   createdAt: number;
 }
 
-const idempotencyStore = new Map<string, IdempotencyEntry>();
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-// Periodic cleanup of expired entries
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of idempotencyStore.entries()) {
-    if (now - entry.createdAt > IDEMPOTENCY_TTL_MS) {
-      idempotencyStore.delete(key);
-    }
-  }
-}, 60 * 60 * 1000); // every hour
+const IDEMPOTENCY_PREFIX = 'stripe:';
 
 async function checkIdempotency(key: string): Promise<IdempotencyEntry | null> {
-  const entry = idempotencyStore.get(key);
+  const entry = await cacheGet<IdempotencyEntry>(`${IDEMPOTENCY_PREFIX}${key}`);
   if (!entry) return null;
   if (Date.now() - entry.createdAt > IDEMPOTENCY_TTL_MS) {
-    idempotencyStore.delete(key);
     return null;
   }
   return entry;
 }
 
-function setIdempotency(key: string, entry: IdempotencyEntry): void {
-  idempotencyStore.set(key, entry);
+async function setIdempotency(key: string, entry: IdempotencyEntry): Promise<void> {
+  await cacheSet(`${IDEMPOTENCY_PREFIX}${key}`, entry, IDEMPOTENCY_TTL_MS);
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -92,7 +82,7 @@ export async function createDeposit(
     throw new AppError('Maximum deposit is $500.00', 400);
   }
 
-  setIdempotency(idempotencyKey, { status: 'pending', createdAt: Date.now() });
+  await setIdempotency(idempotencyKey, { status: 'pending', createdAt: Date.now() });
 
   try {
     // Get or create Stripe customer
@@ -159,7 +149,7 @@ export async function createDeposit(
       currency: 'usd',
     };
 
-    setIdempotency(idempotencyKey, {
+    await setIdempotency(idempotencyKey, {
       status: 'completed',
       response: result,
       createdAt: Date.now(),
@@ -172,7 +162,7 @@ export async function createDeposit(
 
     return result;
   } catch (err) {
-    setIdempotency(idempotencyKey, {
+    await setIdempotency(idempotencyKey, {
       status: 'failed',
       error: err instanceof Error ? err.message : 'Unknown error',
       createdAt: Date.now(),
@@ -250,7 +240,7 @@ export async function createWithdrawal(
     throw new AppError('Minimum withdrawal is 100 tokens ($1.00)', 400);
   }
 
-  setIdempotency(idempotencyKey, { status: 'pending', createdAt: Date.now() });
+  await setIdempotency(idempotencyKey, { status: 'pending', createdAt: Date.now() });
 
   try {
     // Debit tokens first (inside its own transaction). This ensures the user
@@ -294,7 +284,7 @@ export async function createWithdrawal(
       status: 'pending',
     };
 
-    setIdempotency(idempotencyKey, {
+    await setIdempotency(idempotencyKey, {
       status: 'completed',
       response: result,
       createdAt: Date.now(),
@@ -307,7 +297,7 @@ export async function createWithdrawal(
 
     return result;
   } catch (err) {
-    setIdempotency(idempotencyKey, {
+    await setIdempotency(idempotencyKey, {
       status: 'failed',
       error: err instanceof Error ? err.message : 'Unknown error',
       createdAt: Date.now(),

@@ -9,16 +9,18 @@ import { prisma } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import nodemailer from 'nodemailer';
+import { cacheSet, cacheGet, cacheDel } from '../../shared/cache/durable.js';
 
-// ─── In-memory SMS/Email code store (replace with Redis in production) ────────
+// ─── Durable cache for SMS/email codes (Postgres-backed) ──────────────────────
 
 interface CodeEntry {
   code: string;
   expiresAt: number;
 }
 
-const smsCodeStore = new Map<string, CodeEntry>();
-const emailCodeStore = new Map<string, CodeEntry>();
+// Prefixes keep the two namespaces collision-free in the cache_entries table.
+const SMS_PREFIX = 'sms:';
+const EMAIL_PREFIX = 'email:';
 
 // ─── Twilio client (lazy, only constructed if credentials are present) ────────
 
@@ -245,18 +247,17 @@ export async function verifyTOTP(userId: string, code: string): Promise<boolean>
 
 /**
  * Generate and store a 6-digit SMS verification code for the given phone number.
- * Returns the plaintext code (in production this would be sent via Twilio).
+ * Returns the plaintext code. Persists to the Postgres-backed cache so the
+ * code survives restarts and works across horizontally scaled instances.
  */
 export async function sendSMSCode(phoneNumber: string): Promise<string> {
   const code = String(crypto.randomInt(100000, 1000000));
+  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min TTL
 
-  smsCodeStore.set(phoneNumber, {
-    code,
-    expiresAt: Date.now() + 5 * 60 * 1000, // 5 min TTL
-  });
+  await cacheSet(`${SMS_PREFIX}${phoneNumber}`, { code, expiresAt }, 5 * 60 * 1000);
 
   // Send via Twilio when configured. In dev (no credentials) we fall back to
-  // logging only — the in-memory store still works for verification.
+  // logging only — the durable cache still works for verification.
   try {
     const client = getTwilioClient();
     await client.messages.create({
@@ -267,8 +268,8 @@ export async function sendSMSCode(phoneNumber: string): Promise<string> {
     logger.info({ phoneNumber }, 'SMS verification code sent via Twilio');
   } catch (err) {
     // Twilio not configured or network failure — log at debug so tests don't
-    // spam, but the code is still usable via the in-memory store.
-    logger.debug({ err, phoneNumber }, 'SMS send failed (falling back to store)');
+    // spam, but the code is still usable via the durable cache.
+    logger.debug({ err, phoneNumber }, 'SMS send failed (falling back to cache)');
   }
 
   return code;
@@ -276,18 +277,16 @@ export async function sendSMSCode(phoneNumber: string): Promise<string> {
 
 /**
  * Generate and store a 6-digit email verification code.
- * Returns the plaintext code (in production this would be sent via nodemailer).
+ * Returns the plaintext code. Persists to the Postgres-backed cache.
  */
 export async function sendEmailCode(email: string): Promise<string> {
   const code = String(crypto.randomInt(100000, 1000000));
+  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min TTL
 
-  emailCodeStore.set(email, {
-    code,
-    expiresAt: Date.now() + 5 * 60 * 1000, // 5 min TTL
-  });
+  await cacheSet(`${EMAIL_PREFIX}${email}`, { code, expiresAt }, 5 * 60 * 1000);
 
   // Send via nodemailer when SMTP is configured. In dev we fall back to
-  // logging only — the in-memory store still works for verification.
+  // logging only — the durable cache still works for verification.
   try {
     const transport = getSmtpTransport();
     await transport.sendMail({
@@ -307,40 +306,42 @@ export async function sendEmailCode(email: string): Promise<string> {
 
 /**
  * Verify a stored SMS code against a phone number.
+ * Reads from the Postgres-backed cache (survives restarts).
  */
-export function verifySMSCode(phoneNumber: string, code: string): boolean {
-  const entry = smsCodeStore.get(phoneNumber);
+export async function verifySMSCode(phoneNumber: string, code: string): Promise<boolean> {
+  const entry = await cacheGet<CodeEntry>(`${SMS_PREFIX}${phoneNumber}`);
   if (!entry) {
     return false;
   }
   if (Date.now() > entry.expiresAt) {
-    smsCodeStore.delete(phoneNumber);
+    await cacheDel(`${SMS_PREFIX}${phoneNumber}`);
     return false;
   }
-  const valid = entry.code === code;
-  if (valid) {
-    smsCodeStore.delete(phoneNumber);
+  if (entry.code === code) {
+    await cacheDel(`${SMS_PREFIX}${phoneNumber}`);
+    return true;
   }
-  return valid;
+  return false;
 }
 
 /**
  * Verify a stored email code against an email address.
+ * Reads from the Postgres-backed cache (survives restarts).
  */
-export function verifyEmailCode(email: string, code: string): boolean {
-  const entry = emailCodeStore.get(email);
+export async function verifyEmailCode(email: string, code: string): Promise<boolean> {
+  const entry = await cacheGet<CodeEntry>(`${EMAIL_PREFIX}${email}`);
   if (!entry) {
     return false;
   }
   if (Date.now() > entry.expiresAt) {
-    emailCodeStore.delete(email);
+    await cacheDel(`${EMAIL_PREFIX}${email}`);
     return false;
   }
-  const valid = entry.code === code;
-  if (valid) {
-    emailCodeStore.delete(email);
+  if (entry.code === code) {
+    await cacheDel(`${EMAIL_PREFIX}${email}`);
+    return true;
   }
-  return valid;
+  return false;
 }
 
 /**

@@ -15,6 +15,7 @@ import { prisma } from '../../config/database.js';
 import { logger } from '../../config/logger.js';
 import { invalidateBrainState } from '../cache/brainState.js';
 import { evaluateContract } from './evaluate-contract.js';
+import { cleanupExpiredCache } from '../cache/durable.js';
 
 // ─── Brain recalc ─────────────────────────────────────────────────────────────
 
@@ -76,6 +77,13 @@ export async function handleContractResolveAll(): Promise<void> {
   if (processedTotal > 0) {
     logger.info({ count: processedTotal }, 'Hourly contract sweep resolved contracts');
   }
+}
+
+// ─── Cache maintenance ─────────────────────────────────────────────────────────
+
+/** Deletes expired rows from the `cache_entries` table. */
+export async function handleCacheCleanup(): Promise<void> {
+  await cleanupExpiredCache();
 }
 
 // ─── Streak evaluation ────────────────────────────────────────────────────────

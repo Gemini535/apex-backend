@@ -20,6 +20,7 @@ import { JOBS } from './jobs.js';
 import {
   handleBrainRecalc,
   handleContractResolveAll,
+  handleCacheCleanup,
   handleStreakDecay,
 } from './handlers.js';
 import type {
@@ -72,6 +73,11 @@ export async function startBoss(): Promise<PgBoss> {
     // Hourly sweep: evaluate and resolve overdue commitment contracts.
     if (env.nodeEnv !== 'test') {
       await instance.schedule(JOBS.CONTRACT_RESOLVE_ALL, '0 * * * *');
+    }
+
+    // Cache maintenance: purge expired rows every 30 minutes.
+    if (env.nodeEnv !== 'test') {
+      await instance.schedule(JOBS.CACHE_CLEANUP, '*/30 * * * *');
     }
 
     boss = instance;

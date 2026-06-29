@@ -221,20 +221,20 @@ describe('auth.service — SMS verification codes', () => {
 
   it('rejects an incorrect code', async () => {
     await sendSMSCode('+1234567890');
-    const isValid = verifySMSCode('+1234567890', '000000');
+    const isValid = await verifySMSCode('+1234567890', '000000');
     expect(isValid).toBe(false);
   });
 
-  it('returns false for unknown phone number', () => {
-    const isValid = verifySMSCode('+1999999999', '123456');
+  it('returns false for unknown phone number', async () => {
+    const isValid = await verifySMSCode('+1999999999', '123456');
     expect(isValid).toBe(false);
   });
 
   it('consumes code after successful verification (one-time use)', async () => {
     const code = await sendSMSCode('+1555555555');
-    const firstTry = verifySMSCode('+1555555555', code);
+    const firstTry = await verifySMSCode('+1555555555', code);
     expect(firstTry).toBe(true);
-    const secondTry = verifySMSCode('+1555555555', code);
+    const secondTry = await verifySMSCode('+1555555555', code);
     expect(secondTry).toBe(false);
   });
 });
@@ -247,15 +247,15 @@ describe('auth.service — Email verification codes', () => {
 
   it('rejects an incorrect code', async () => {
     await sendEmailCode('test@apex.app');
-    const isValid = verifyEmailCode('test@apex.app', '000000');
+    const isValid = await verifyEmailCode('test@apex.app', '000000');
     expect(isValid).toBe(false);
   });
 
   it('consumes code after successful verification (one-time use)', async () => {
     const code = await sendEmailCode('consume@apex.app');
-    const firstTry = verifyEmailCode('consume@apex.app', code);
+    const firstTry = await verifyEmailCode('consume@apex.app', code);
     expect(firstTry).toBe(true);
-    const secondTry = verifyEmailCode('consume@apex.app', code);
+    const secondTry = await verifyEmailCode('consume@apex.app', code);
     expect(secondTry).toBe(false);
   });
 });
