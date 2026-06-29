@@ -3,6 +3,7 @@ import { logger } from '../config/logger.js';
 import { emitToUser, getOnlineFriends } from './websocket/socket.js';
 import { evaluateStreak } from '../modules/users/streak.service.js';
 import { appEvents } from './events.js';
+import { getUtcDayBoundary, resolveTimezone } from './tz.js';
 import type { BrainTier } from '@prisma/client';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -37,11 +38,18 @@ const TIER_THRESHOLDS = {
  * Called whenever screen time entries are uploaded.
  */
 export async function recalculateBrainState(userId: string): Promise<BrainStateUpdate | null> {
-  const now = new Date();
-  const dayStart = new Date(now);
-  dayStart.setUTCHours(0, 0, 0, 0);
-  const dayEnd = new Date(now);
-  dayEnd.setUTCHours(23, 59, 59, 999);
+  // Compute the user's local "today" in UTC. A user in America/New_York
+  // experiences midnight at 04:00 or 05:00 UTC depending on DST — if we used
+  // raw UTC midnight we'd either miss or double-count screen time entries.
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { timezone: true },
+  });
+
+  const { dayStart, dayEnd } = getUtcDayBoundary(
+    resolveTimezone(user?.timezone),
+    new Date(),
+  );
 
   // Gather today's screen time entries
   const entries = await prisma.screenTimeEntry.findMany({
@@ -59,12 +67,18 @@ export async function recalculateBrainState(userId: string): Promise<BrainStateU
   const tier = calculateTier(totalScreenTime);
   const healthPercent = calculateHealth(totalScreenTime, focusTime);
 
+  // Persist under UTC midnight so BrainState.date stays consistent across
+  // timezones and remains queriable by the canonical UTC day. The DB query
+  // above uses the zoned boundaries so the right entries are aggregated.
+  const canonicalDayStart = new Date(dayStart);
+  canonicalDayStart.setUTCHours(0, 0, 0, 0);
+
   // Upsert brain state for today
   await prisma.brainState.upsert({
-    where: { userId_date: { userId, date: dayStart } },
+    where: { userId_date: { userId, date: canonicalDayStart } },
     create: {
       userId,
-      date: dayStart,
+      date: canonicalDayStart,
       tier,
       healthPercent,
       totalScreenTime,

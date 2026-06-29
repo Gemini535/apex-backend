@@ -176,6 +176,9 @@ enum TransactionType {
   PURCHASE
   BONUS
   PENALTY
+  CONTRACT_STAKE
+  CONTRACT_PAYOUT
+  CONTRACT_FORFEIT
 }
 
 model Pool {

@@ -3,6 +3,7 @@ import type { AppCategory, BrainTier } from '@prisma/client';
 import { calculateTier, calculateHealth } from '../../shared/brain-engine.js';
 import { enqueue } from '../../shared/queue/boss.js';
 import { JOBS } from '../../shared/queue/jobs.js';
+import { getUtcDayBoundary, resolveTimezone } from '../../shared/tz.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -129,9 +130,17 @@ export async function uploadBatch(
 }
 
 export async function getTodaySummary(userId: string): Promise<TodaySummary> {
-  const now = new Date();
-  const dayStart = getStartOfDay(now);
-  const dayEnd = getEndOfDay(now);
+  // Compute the user's local today in UTC. A user in Tokyo aggregating "now"
+  // (which was yesterday in UTC) needs to see their last Tokyo-day entries,
+  // not the UTC-day entries falling outside it.
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { timezone: true },
+  });
+  const { dayStart, dayEnd } = getUtcDayBoundary(
+    resolveTimezone(user?.timezone),
+    new Date(),
+  );
 
   const entries = await prisma.screenTimeEntry.findMany({
     where: {
@@ -332,8 +341,14 @@ export async function updateBrainState(
   focusTime: number;
   categoryBreakdown: Record<string, number>;
 }> {
-  const dayStart = getStartOfDay(date);
-  const dayEnd = getEndOfDay(date);
+  // Convert the requested date to a UTC day boundary in the user's zone so
+  // that "2026-01-02 in America/New_York" aggregates entries from the right
+  // UTC hours even when the date itself is UTC-encoded.
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { timezone: true },
+  });
+  const { dayStart, dayEnd } = getUtcDayBoundary(resolveTimezone(user?.timezone), date);
 
   const entries = await prisma.screenTimeEntry.findMany({
     where: {
@@ -356,16 +371,21 @@ export async function updateBrainState(
     categoryBreakdown[entry.category] = current + entry.duration;
   }
 
+  // Persist under UTC midnight so BrainState.date stays consistent across
+  // timezones. The query above uses the zoned boundaries.
+  const canonicalDayStart = new Date(dayStart);
+  canonicalDayStart.setUTCHours(0, 0, 0, 0);
+
   const brainState = await prisma.brainState.upsert({
     where: {
       userId_date: {
         userId,
-        date: dayStart,
+        date: canonicalDayStart,
       },
     },
     create: {
       userId,
-      date: dayStart,
+      date: canonicalDayStart,
       tier,
       healthPercent,
       totalScreenTime,

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { prisma } from '../../config/database.js';
 import type { AppCategory } from '@prisma/client';
+import { clearAllCaches } from '../../shared/cache/index.js';
 import {
   uploadBatch,
   getTodaySummary,
@@ -15,6 +16,7 @@ describe('screentime.service', () => {
   let testUserId: string;
 
   beforeEach(async () => {
+    clearAllCaches();
     const user = await prisma.user.create({
       data: {
         email: `st-${Date.now()}-${Math.random().toString(36).slice(2)}@test.app`,
