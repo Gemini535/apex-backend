@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authenticateToken } from '../../middleware/auth.js';
 import { validate } from '../../middleware/validate.js';
-import { batchUpload, dateRange } from './screentime.validation.js';
+import { batchUpload, dateRange, optionalDateRange } from './screentime.validation.js';
 import {
   uploadBatch,
   getToday,
@@ -16,8 +16,8 @@ const router = Router();
 router.post('/batch', authenticateToken, validate(batchUpload), uploadBatch);
 router.get('/today', authenticateToken, getToday);
 router.get('/range', authenticateToken, validate(dateRange), getRange);
-router.get('/apps', authenticateToken, getApps);
-router.get('/categories', authenticateToken, getCategories);
+router.get('/apps', authenticateToken, validate(optionalDateRange), getApps);
+router.get('/categories', authenticateToken, validate(optionalDateRange), getCategories);
 router.get('/active', authenticateToken, getActive);
 
 export default router;

@@ -18,8 +18,21 @@ function createMocks() {
   return { headers, res, next };
 }
 
+/** Signs a token exactly like `generateAccessToken` does — `type: 'access'`
+ * plus a `sid` binding it to a specific Session row. */
+function signAccessToken(
+  payload: { userId: string; email: string; username: string },
+  sessionId: string | undefined,
+  options: jwt.SignOptions = { expiresIn: '15m' },
+): string {
+  return jwt.sign({ ...payload, type: 'access', sid: sessionId }, env.jwt.secret, options);
+}
+
 describe('authenticateToken middleware', () => {
   let testUserId: string;
+  let testEmail: string;
+  let testUsername: string;
+  let sessionId: string;
   let validToken: string;
 
   beforeEach(async () => {
@@ -35,21 +48,21 @@ describe('authenticateToken middleware', () => {
       },
     });
     testUserId = user.id;
+    testEmail = user.email;
+    testUsername = user.username;
 
-    validToken = jwt.sign(
-      { userId: user.id, email: user.email, username: user.username },
-      env.jwt.secret,
-      { expiresIn: '15m' },
-    );
-
-    // Create a valid session
-    await prisma.session.create({
+    // Create a valid session first so we can bind the token to its id —
+    // mirrors auth.controller.ts's real issueTokens() ordering.
+    const session = await prisma.session.create({
       data: {
         userId: user.id,
-        refreshToken: 'test-refresh-token',
+        refreshToken: `test-refresh-token-${Date.now()}`,
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
     });
+    sessionId = session.id;
+
+    validToken = signAccessToken({ userId: user.id, email: user.email, username: user.username }, sessionId);
   });
 
   it('rejects requests with no authorization header', async () => {
@@ -68,9 +81,9 @@ describe('authenticateToken middleware', () => {
   });
 
   it('rejects expired tokens', async () => {
-    const expiredToken = jwt.sign(
+    const expiredToken = signAccessToken(
       { userId: testUserId, email: 'test@test.com', username: 'test' },
-      env.jwt.secret,
+      sessionId,
       { expiresIn: '0s' },
     );
     const { res, next } = createMocks();
@@ -82,7 +95,7 @@ describe('authenticateToken middleware', () => {
 
   it('rejects tokens with invalid signature', async () => {
     const badToken = jwt.sign(
-      { userId: testUserId, email: 'test@test.com', username: 'test' },
+      { userId: testUserId, email: 'test@test.com', username: 'test', type: 'access', sid: sessionId },
       'wrong-secret',
       { expiresIn: '15m' },
     );
@@ -91,6 +104,29 @@ describe('authenticateToken middleware', () => {
     await authenticateToken(req, res, next);
     expect(res._status).toBe(403);
     expect(res._body.error).toBe('Invalid token');
+  });
+
+  it('rejects tokens missing the type/sid claims (e.g. a 2FA temp token, or a pre-session-binding token)', async () => {
+    const bareToken = jwt.sign(
+      { userId: testUserId, email: testEmail, username: testUsername },
+      env.jwt.secret,
+      { expiresIn: '15m' },
+    );
+    const { res, next } = createMocks();
+    const req: any = { headers: { authorization: `Bearer ${bareToken}` }, ip: '127.0.0.1' };
+    await authenticateToken(req, res, next);
+    expect(res._status).toBe(403);
+    expect(res._body.error).toBe('Invalid token');
+  });
+
+  it('rejects a token whose session has been revoked (rotated away)', async () => {
+    await prisma.session.update({ where: { id: sessionId }, data: { revokedAt: new Date() } });
+
+    const { res, next } = createMocks();
+    const req: any = { headers: { authorization: `Bearer ${validToken}` }, ip: '127.0.0.1' };
+    await authenticateToken(req, res, next);
+    expect(res._status).toBe(401);
+    expect(res._body.error).toBe('Session expired or invalidated');
   });
 
   it('rejects valid tokens for users with no active session', async () => {

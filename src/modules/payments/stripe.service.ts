@@ -24,8 +24,22 @@ interface IdempotencyEntry {
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const IDEMPOTENCY_PREFIX = 'stripe:';
 
-async function checkIdempotency(key: string): Promise<IdempotencyEntry | null> {
-  const entry = await cacheGet<IdempotencyEntry>(`${IDEMPOTENCY_PREFIX}${key}`);
+/**
+ * Namespaces the cache key by `userId` in addition to the client-supplied
+ * idempotency key. Previously the key was just `stripe:${idempotencyKey}`
+ * with no user scoping — if two different users' clients ever submitted the
+ * same idempotency key (a buggy client reusing one, or a malicious user
+ * deliberately guessing/reusing someone else's), `createDeposit` would
+ * return the OTHER user's cached PaymentIntent — including its
+ * `clientSecret` — to the wrong caller, a cross-tenant secret leak
+ * (CODE_REVIEW.md #9).
+ */
+function idempotencyCacheKey(userId: string, idempotencyKey: string): string {
+  return `${IDEMPOTENCY_PREFIX}${userId}:${idempotencyKey}`;
+}
+
+async function checkIdempotency(userId: string, key: string): Promise<IdempotencyEntry | null> {
+  const entry = await cacheGet<IdempotencyEntry>(idempotencyCacheKey(userId, key));
   if (!entry) return null;
   if (Date.now() - entry.createdAt > IDEMPOTENCY_TTL_MS) {
     return null;
@@ -33,8 +47,8 @@ async function checkIdempotency(key: string): Promise<IdempotencyEntry | null> {
   return entry;
 }
 
-async function setIdempotency(key: string, entry: IdempotencyEntry): Promise<void> {
-  await cacheSet(`${IDEMPOTENCY_PREFIX}${key}`, entry, IDEMPOTENCY_TTL_MS);
+async function setIdempotency(userId: string, key: string, entry: IdempotencyEntry): Promise<void> {
+  await cacheSet(idempotencyCacheKey(userId, key), entry, IDEMPOTENCY_TTL_MS);
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -63,7 +77,7 @@ export async function createDeposit(
   idempotencyKey: string
 ): Promise<DepositResult> {
   // Check idempotency
-  const existing = await checkIdempotency(idempotencyKey);
+  const existing = await checkIdempotency(userId, idempotencyKey);
   if (existing) {
     if (existing.status === 'completed') {
       return existing.response as DepositResult;
@@ -82,7 +96,7 @@ export async function createDeposit(
     throw new AppError('Maximum deposit is $500.00', 400);
   }
 
-  await setIdempotency(idempotencyKey, { status: 'pending', createdAt: Date.now() });
+  await setIdempotency(userId, idempotencyKey, { status: 'pending', createdAt: Date.now() });
 
   try {
     // Get or create Stripe customer
@@ -149,7 +163,7 @@ export async function createDeposit(
       currency: 'usd',
     };
 
-    await setIdempotency(idempotencyKey, {
+    await setIdempotency(userId, idempotencyKey, {
       status: 'completed',
       response: result,
       createdAt: Date.now(),
@@ -162,7 +176,7 @@ export async function createDeposit(
 
     return result;
   } catch (err) {
-    await setIdempotency(idempotencyKey, {
+    await setIdempotency(userId, idempotencyKey, {
       status: 'failed',
       error: err instanceof Error ? err.message : 'Unknown error',
       createdAt: Date.now(),
@@ -225,7 +239,7 @@ export async function createWithdrawal(
   idempotencyKey: string
 ): Promise<WithdrawResult> {
   // Check idempotency
-  const existing = await checkIdempotency(idempotencyKey);
+  const existing = await checkIdempotency(userId, idempotencyKey);
   if (existing) {
     if (existing.status === 'completed') {
       return existing.response as WithdrawResult;
@@ -240,7 +254,7 @@ export async function createWithdrawal(
     throw new AppError('Minimum withdrawal is 100 tokens ($1.00)', 400);
   }
 
-  await setIdempotency(idempotencyKey, { status: 'pending', createdAt: Date.now() });
+  await setIdempotency(userId, idempotencyKey, { status: 'pending', createdAt: Date.now() });
 
   try {
     // Debit tokens first (inside its own transaction). This ensures the user
@@ -284,7 +298,7 @@ export async function createWithdrawal(
       status: 'pending',
     };
 
-    await setIdempotency(idempotencyKey, {
+    await setIdempotency(userId, idempotencyKey, {
       status: 'completed',
       response: result,
       createdAt: Date.now(),
@@ -297,7 +311,7 @@ export async function createWithdrawal(
 
     return result;
   } catch (err) {
-    await setIdempotency(idempotencyKey, {
+    await setIdempotency(userId, idempotencyKey, {
       status: 'failed',
       error: err instanceof Error ? err.message : 'Unknown error',
       createdAt: Date.now(),
@@ -358,20 +372,40 @@ export async function handleWebhook(
         });
 
         if (tx) {
-          // Reverse the credit: debit the same amount from the wallet.
-          await debitTokens(
-            // The wallet belongs to the user who received the credit.
-            // Look up the wallet via the transaction's wallet → user.
-            (await prisma.tokenWallet.findUnique({ where: { id: tx.walletId } }))!.userId,
-            Math.abs(tx.amount),
-            'SPENT',
-            `Refund reversal for charge ${charge.id}`,
-            charge.id,
-          );
-          logger.info(
-            { chargeId: charge.id, userId: tx.walletId, amount: Math.abs(tx.amount) },
-            'Tokens reversed for refunded charge',
-          );
+          const wallet = await prisma.tokenWallet.findUnique({ where: { id: tx.walletId } });
+
+          if (wallet) {
+            try {
+              // Reverse the credit: debit the same amount from the wallet.
+              await debitTokens(
+                wallet.userId,
+                Math.abs(tx.amount),
+                'SPENT',
+                `Refund reversal for charge ${charge.id}`,
+                charge.id,
+              );
+              logger.info(
+                { chargeId: charge.id, userId: wallet.userId, amount: Math.abs(tx.amount) },
+                'Tokens reversed for refunded charge',
+              );
+            } catch (err) {
+              // The user may have already spent the tokens before the
+              // refund arrived, so the debit can legitimately fail with
+              // "insufficient balance" — there's no way to claw back tokens
+              // that no longer exist, and retrying this webhook won't
+              // change that. Previously this error propagated uncaught,
+              // causing Stripe to receive a 500 and retry indefinitely with
+              // no path to resolution and no distinct signal for
+              // operators to act on (CODE_REVIEW.md #20). Log loudly for
+              // manual reconciliation instead, and still acknowledge the
+              // webhook below — Stripe's refund already happened
+              // regardless of whether we could reverse the tokens.
+              logger.error(
+                { err, chargeId: charge.id, userId: wallet.userId, amount: Math.abs(tx.amount) },
+                'Failed to reverse tokens for refunded charge — likely already spent by the user; needs manual reconciliation',
+              );
+            }
+          }
         }
       } else {
         logger.info(

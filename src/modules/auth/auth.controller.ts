@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../../config/database.js';
-import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { AppError } from '../../middleware/errorHandler.js';
+import type { Session } from '@prisma/client';
 import {
   hashPassword,
   comparePassword,
@@ -11,6 +11,7 @@ import {
   verifyRefreshToken,
   setupTOTP,
   verifyTOTP,
+  verifyBackupCode,
   sendSMSCode,
   sendEmailCode,
   verifySMSCode,
@@ -24,7 +25,7 @@ import type { SafeUser } from '../../shared/types/auth.types.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function toSafeUser(user: {
+interface UserWithTwoFactor {
   id: string;
   email: string;
   username: string;
@@ -34,8 +35,10 @@ function toSafeUser(user: {
   brainTier: string;
   currentStreak: number;
   createdAt: Date;
-  twoFactor?: { totpEnabled: boolean } | null;
-}): SafeUser {
+  twoFactor?: { totpEnabled: boolean; smsEnabled: boolean; emailEnabled: boolean } | null;
+}
+
+function toSafeUser(user: UserWithTwoFactor): SafeUser {
   return {
     id: user.id,
     email: user.email,
@@ -46,19 +49,24 @@ function toSafeUser(user: {
     brainTier: user.brainTier,
     currentStreak: user.currentStreak,
     createdAt: user.createdAt,
-    requires2FA: user.twoFactor?.totpEnabled ?? false,
+    requires2FA: is2FAEnabled(user.twoFactor),
   };
+}
+
+/** True if ANY 2FA method — TOTP, SMS, or email — is enabled for the user. */
+function is2FAEnabled(twoFactor: UserWithTwoFactor['twoFactor']): boolean {
+  return Boolean(twoFactor?.totpEnabled || twoFactor?.smsEnabled || twoFactor?.emailEnabled);
 }
 
 async function createSession(
   userId: string,
   refreshToken: string,
   req: Request
-): Promise<void> {
+): Promise<Session> {
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7); // 7 days
 
-  await prisma.session.create({
+  return prisma.session.create({
     data: {
       userId,
       refreshToken,
@@ -67,6 +75,54 @@ async function createSession(
       expiresAt,
     },
   });
+}
+
+/**
+ * Creates a session and mints an access token bound to it in one step —
+ * every login-shaped flow (register, login, 2FA login, OAuth, refresh) needs
+ * exactly this pair, in this order, so the access token can carry the new
+ * session's id (see generateAccessToken's docstring / CODE_REVIEW.md #6).
+ */
+async function issueTokens(
+  user: { id: string; email: string; username: string },
+  req: Request,
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const refreshToken = generateRefreshToken();
+  const session = await createSession(user.id, refreshToken, req);
+  const accessToken = generateAccessToken(
+    { userId: user.id, email: user.email, username: user.username },
+    session.id,
+  );
+  return { accessToken, refreshToken };
+}
+
+/**
+ * Verifies a 2FA code against whichever method is actually enabled for the
+ * user, trying TOTP first (falling back to a one-time backup code), then
+ * SMS, then email. Shared by `verify2FALogin` and `disable2FA` so both
+ * endpoints work correctly regardless of which method the user set up —
+ * previously both call sites hard-coded `verifyTOTP`, which meant SMS/Email
+ * -only users were never actually challenged at login (CODE_REVIEW.md #4)
+ * and could never disable their own 2FA (CODE_REVIEW.md #15).
+ */
+async function verifyAnyEnabled2FA(
+  userId: string,
+  email: string,
+  code: string,
+  twoFactor: { totpEnabled: boolean; smsEnabled: boolean; smsPhoneNumber: string | null; emailEnabled: boolean } | null,
+): Promise<boolean> {
+  if (!twoFactor) return false;
+
+  if (twoFactor.totpEnabled) {
+    return (await verifyTOTP(userId, code)) || (await verifyBackupCode(userId, code));
+  }
+  if (twoFactor.smsEnabled && twoFactor.smsPhoneNumber) {
+    return verifySMSCode(twoFactor.smsPhoneNumber, code);
+  }
+  if (twoFactor.emailEnabled) {
+    return verifyEmailCode(email, code);
+  }
+  return false;
 }
 
 // ─── Controllers ──────────────────────────────────────────────────────────────
@@ -93,28 +149,33 @@ export async function register(req: Request, res: Response, next: NextFunction):
 
     const passwordHash = await hashPassword(password);
 
-    const user = await prisma.user.create({
-      data: {
-        email,
-        username,
-        passwordHash,
-        tokenWallet: {
-          create: { balance: 0 },
+    let user;
+    try {
+      user = await prisma.user.create({
+        data: {
+          email,
+          username,
+          passwordHash,
+          tokenWallet: {
+            create: { balance: 0 },
+          },
+          twoFactor: {
+            create: {},
+          },
         },
-        twoFactor: {
-          create: {},
-        },
-      },
-      include: { twoFactor: true },
-    });
+        include: { twoFactor: true },
+      });
+    } catch (err) {
+      // A concurrent request could win the race between our pre-check above
+      // and this insert; the unique constraint on email/username is the
+      // real guard. Surface that as a clean 409 instead of a raw 500.
+      if (isUniqueConstraintError(err)) {
+        throw new AppError('An account with this email or username already exists', 409);
+      }
+      throw err;
+    }
 
-    const accessToken = generateAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-    });
-    const refreshToken = generateRefreshToken();
-    await createSession(user.id, refreshToken, req);
+    const { accessToken, refreshToken } = await issueTokens(user, req);
 
     logger.info({ userId: user.id }, 'User registered successfully');
 
@@ -146,8 +207,11 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       throw new AppError('Invalid email or password', 401);
     }
 
-    // Check if 2FA is required
-    if (user.twoFactor?.totpEnabled) {
+    // Require the 2FA challenge if ANY method is enabled — not just TOTP.
+    // Previously this only checked `totpEnabled`, so a user who enabled
+    // SMS-only or Email-only 2FA was never actually challenged for it at
+    // login; password alone was sufficient (CODE_REVIEW.md #4).
+    if (is2FAEnabled(user.twoFactor)) {
       const tempToken = generate2FATempToken(user.id);
       res.json({
         requires2FA: true,
@@ -156,13 +220,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       return;
     }
 
-    const accessToken = generateAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-    });
-    const refreshToken = generateRefreshToken();
-    await createSession(user.id, refreshToken, req);
+    const { accessToken, refreshToken } = await issueTokens(user, req);
 
     // Update last login
     await prisma.user.update({
@@ -182,6 +240,57 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
   }
 }
 
+/**
+ * For SMS/Email 2FA, the client must request a code be sent before it can
+ * submit one to `/auth/login/2fa`. TOTP needs no such step (the code comes
+ * from the user's authenticator app), so this simply reports that.
+ */
+export async function send2FALoginCode(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { tempToken } = req.body as { tempToken: string };
+
+    const payload = verify2FATempToken(tempToken);
+    if (!payload) {
+      throw new AppError('Invalid or expired 2FA session', 401);
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: payload.userId },
+      include: { twoFactor: true },
+    });
+    if (!user || !user.twoFactor) {
+      throw new AppError('User not found', 404);
+    }
+
+    if (user.twoFactor.totpEnabled) {
+      res.json({ method: 'totp' });
+      return;
+    }
+    if (user.twoFactor.smsEnabled && user.twoFactor.smsPhoneNumber) {
+      const code = await sendSMSCode(user.twoFactor.smsPhoneNumber);
+      res.json({
+        method: 'sms',
+        message: 'Verification code sent to your phone',
+        ...(process.env.NODE_ENV === 'development' && { code }),
+      });
+      return;
+    }
+    if (user.twoFactor.emailEnabled) {
+      const code = await sendEmailCode(user.email);
+      res.json({
+        method: 'email',
+        message: 'Verification code sent to your email',
+        ...(process.env.NODE_ENV === 'development' && { code }),
+      });
+      return;
+    }
+
+    throw new AppError('No 2FA method is enabled for this account', 400);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function verify2FALogin(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { tempToken, code } = req.body as { tempToken: string; code: string };
@@ -189,11 +298,6 @@ export async function verify2FALogin(req: Request, res: Response, next: NextFunc
     const payload = verify2FATempToken(tempToken);
     if (!payload) {
       throw new AppError('Invalid or expired 2FA session', 401);
-    }
-
-    const isValid = await verifyTOTP(payload.userId, code);
-    if (!isValid) {
-      throw new AppError('Invalid 2FA code', 401);
     }
 
     const user = await prisma.user.findUnique({
@@ -205,13 +309,12 @@ export async function verify2FALogin(req: Request, res: Response, next: NextFunc
       throw new AppError('User not found', 404);
     }
 
-    const accessToken = generateAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-    });
-    const refreshToken = generateRefreshToken();
-    await createSession(user.id, refreshToken, req);
+    const isValid = await verifyAnyEnabled2FA(user.id, user.email, code, user.twoFactor);
+    if (!isValid) {
+      throw new AppError('Invalid 2FA code', 401);
+    }
+
+    const { accessToken, refreshToken } = await issueTokens(user, req);
 
     await prisma.user.update({
       where: { id: user.id },
@@ -279,13 +382,7 @@ export async function appleAuth(req: Request, res: Response, next: NextFunction)
       }
     }
 
-    const accessToken = generateAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-    });
-    const refreshToken = generateRefreshToken();
-    await createSession(user.id, refreshToken, req);
+    const { accessToken, refreshToken } = await issueTokens(user, req);
 
     await prisma.user.update({
       where: { id: user.id },
@@ -353,13 +450,7 @@ export async function googleAuth(req: Request, res: Response, next: NextFunction
       }
     }
 
-    const accessToken = generateAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-    });
-    const refreshToken = generateRefreshToken();
-    await createSession(user.id, refreshToken, req);
+    const { accessToken, refreshToken } = await issueTokens(user, req);
 
     await prisma.user.update({
       where: { id: user.id },
@@ -395,18 +486,22 @@ export async function refresh(req: Request, res: Response, next: NextFunction): 
       throw new AppError('User not found', 404);
     }
 
-    // Rotate: delete old session, create new one
-    await prisma.session.delete({
-      where: { refreshToken },
+    const newRefreshToken = generateRefreshToken();
+    const newSession = await createSession(user.id, newRefreshToken, req);
+
+    // Rotate: mark the old session as revoked (rather than deleting it
+    // outright) so a later replay of this exact refresh token is
+    // detectable as reuse — see `verifyRefreshToken`'s docstring and
+    // CODE_REVIEW.md #25.
+    await prisma.session.update({
+      where: { id: result.sessionId },
+      data: { revokedAt: new Date(), replacedById: newSession.id },
     });
 
-    const accessToken = generateAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-    });
-    const newRefreshToken = generateRefreshToken();
-    await createSession(user.id, newRefreshToken, req);
+    const accessToken = generateAccessToken(
+      { userId: user.id, email: user.email, username: user.username },
+      newSession.id,
+    );
 
     res.json({
       accessToken,
@@ -602,11 +697,19 @@ export async function disable2FA(
   next: NextFunction
 ): Promise<void> {
   try {
-    const { userId } = req.user!;
+    const { userId, email } = req.user!;
     const { code } = req.body as { code: string };
 
-    // Verify current 2FA code before disabling
-    const isValid = await verifyTOTP(userId, code);
+    const twoFactor = await prisma.twoFactorSetting.findUnique({ where: { userId } });
+    if (!is2FAEnabled(twoFactor)) {
+      throw new AppError('2FA is not enabled for this account', 400);
+    }
+
+    // Verify against whichever method is actually enabled — this used to
+    // hard-code a TOTP check, so a user who only ever enabled SMS or Email
+    // 2FA (and therefore has no `totpSecret`) could never disable their own
+    // 2FA at all (CODE_REVIEW.md #15).
+    const isValid = await verifyAnyEnabled2FA(userId, email, code, twoFactor);
     if (!isValid) {
       throw new AppError('Invalid 2FA code', 400);
     }
@@ -634,4 +737,11 @@ export async function disable2FA(
   } catch (err) {
     next(err);
   }
+}
+
+// ─── Internal helpers ──────────────────────────────────────────────────────────
+
+/** True if `err` is a Prisma unique-constraint violation (P2002). */
+function isUniqueConstraintError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002';
 }

@@ -13,8 +13,12 @@ export const register = [
     .withMessage('Username can only contain letters, numbers, and underscores'),
 
   body('password')
-    .isLength({ min: 8 })
-    .withMessage('Password must be at least 8 characters long')
+    // Upper bound prevents an attacker from submitting a multi-megabyte
+    // string straight into bcrypt.hash — bcryptjs is a pure-JS
+    // implementation with no built-in input-length cap, so an unbounded
+    // password is a mild hashing-cost DoS vector (CODE_REVIEW.md #28).
+    .isLength({ min: 8, max: 128 })
+    .withMessage('Password must be between 8 and 128 characters long')
     .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).+$/)
     .withMessage(
       'Password must contain at least one uppercase letter, one lowercase letter, one digit, and one special character. Consider using a strong password like: ' +
@@ -30,7 +34,9 @@ export const login = [
 
   body('password')
     .notEmpty()
-    .withMessage('Password is required'),
+    .withMessage('Password is required')
+    .isLength({ max: 128 })
+    .withMessage('Password must be at most 128 characters long'),
 ];
 
 export const oauth = [
@@ -40,11 +46,21 @@ export const oauth = [
 ];
 
 export const verify2FA = [
+  body('tempToken')
+    .optional()
+    .notEmpty()
+    .withMessage('tempToken must not be empty when provided'),
   body('code')
     .isLength({ min: 6, max: 6 })
     .withMessage('2FA code must be exactly 6 digits')
     .isNumeric()
     .withMessage('2FA code must contain only numbers'),
+];
+
+export const send2FALoginCode = [
+  body('tempToken')
+    .notEmpty()
+    .withMessage('tempToken is required'),
 ];
 
 export const setupSMS2FA = [
@@ -73,8 +89,8 @@ export const resetPassword = [
     .notEmpty()
     .withMessage('Reset token is required'),
   body('password')
-    .isLength({ min: 8 })
-    .withMessage('Password must be at least 8 characters long')
+    .isLength({ min: 8, max: 128 })
+    .withMessage('Password must be between 8 and 128 characters long')
     .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).+$/)
     .withMessage(
       'Password must contain at least one uppercase letter, one lowercase letter, one digit, and one special character'

@@ -51,6 +51,7 @@ export interface PoolParticipantResponse {
   tokensWon: number;
   focusScore: number | null;
   joinedAt: Date;
+  leftAt: Date | null;
 }
 
 export interface PoolLedgerEntry {
@@ -61,6 +62,8 @@ export interface PoolLedgerEntry {
   createdAt: Date;
 }
 
-export interface SettlePoolBody {
-  winnerUserId: string; // user with highest focus score
-}
+// NOTE: settling a pool takes no request body — the winner is derived
+// entirely from real participant activity data rather than a
+// client-supplied value (see pools.service.ts's settlePool /
+// CODE_REVIEW.md #2). The `SettlePoolBody` type that used to live here has
+// been removed since nothing constructs one anymore.

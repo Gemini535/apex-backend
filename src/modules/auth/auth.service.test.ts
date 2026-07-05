@@ -8,6 +8,7 @@ import {
   verifyRefreshToken,
   setupTOTP,
   verifyTOTP,
+  verifyBackupCode,
   sendSMSCode,
   verifySMSCode,
   sendEmailCode,
@@ -152,7 +153,7 @@ describe('auth.service — JWT functions', () => {
       await prisma.user.delete({ where: { id: user.id } });
     });
 
-    it('returns userId for a valid session', async () => {
+    it('returns userId and sessionId for a valid session', async () => {
       const user = await prisma.user.create({
         data: {
           email: `valid-${Date.now()}@test.app`,
@@ -161,7 +162,7 @@ describe('auth.service — JWT functions', () => {
         },
       });
       const validToken = generateRefreshToken();
-      await prisma.session.create({
+      const session = await prisma.session.create({
         data: {
           userId: user.id,
           refreshToken: validToken,
@@ -170,10 +171,48 @@ describe('auth.service — JWT functions', () => {
       });
 
       const result = await verifyRefreshToken(validToken);
-      expect(result).toEqual({ userId: user.id });
+      expect(result).toEqual({ userId: user.id, sessionId: session.id });
 
       // Cleanup
       await prisma.user.delete({ where: { id: user.id } });
+    });
+
+    it('detects reuse of an already-rotated (revoked) refresh token and revokes all sessions', async () => {
+      const user = await prisma.user.create({
+        data: {
+          email: `reuse-${Date.now()}@test.app`,
+          username: `reuse-${Date.now()}`,
+          passwordHash: 'fake',
+        },
+      });
+      const rotatedToken = generateRefreshToken();
+      const otherToken = generateRefreshToken();
+
+      await prisma.session.create({
+        data: {
+          userId: user.id,
+          refreshToken: rotatedToken,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          revokedAt: new Date(), // already rotated away once
+        },
+      });
+      await prisma.session.create({
+        data: {
+          userId: user.id,
+          refreshToken: otherToken,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
+
+      const result = await verifyRefreshToken(rotatedToken);
+      expect(result).toBeNull();
+
+      // Replaying a rotated token should nuke every session for that user,
+      // including the unrelated still-valid one.
+      const remaining = await prisma.session.count({ where: { userId: user.id } });
+      expect(remaining).toBe(0);
+
+      await prisma.user.delete({ where: { id: user.id } }).catch(() => {});
     });
   });
 });
@@ -293,5 +332,32 @@ describe('auth.service — TOTP', () => {
   it('rejects an invalid TOTP code', async () => {
     const isValid = await verifyTOTP(testUserId, '000000');
     expect(isValid).toBe(false);
+  });
+
+  describe('verifyBackupCode', () => {
+    it('accepts a valid backup code exactly once (single-use)', async () => {
+      const { backupCodes } = await setupTOTP(testUserId);
+      const code = backupCodes[0];
+
+      const first = await verifyBackupCode(testUserId, code);
+      expect(first).toBe(true);
+
+      const second = await verifyBackupCode(testUserId, code);
+      expect(second).toBe(false);
+    });
+
+    it('is case-insensitive', async () => {
+      const { backupCodes } = await setupTOTP(testUserId);
+      const code = backupCodes[1];
+
+      const result = await verifyBackupCode(testUserId, code.toLowerCase());
+      expect(result).toBe(true);
+    });
+
+    it('rejects an unknown backup code', async () => {
+      await setupTOTP(testUserId);
+      const result = await verifyBackupCode(testUserId, 'NOTREAL1');
+      expect(result).toBe(false);
+    });
   });
 });

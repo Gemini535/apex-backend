@@ -87,3 +87,20 @@ export function getUtcDayBoundary(
     dayEnd: fromZonedTime(localEnd, tz),
   };
 }
+
+/**
+ * Returns the calendar-day key (`YYYY-MM-DD`) that `instant` falls on in the
+ * given timezone. Use this instead of `instant.toISOString().slice(0, 10)`
+ * whenever you're bucketing entries by "day" for a user — the raw UTC slice
+ * attributes late-evening/early-morning activity to the wrong calendar day
+ * for anyone outside UTC (see CODE_REVIEW.md #17, which flagged exactly this
+ * mistake in `getRangeData` feeding incorrect day-hit counts into
+ * commitment-contract evaluation).
+ *
+ * @param timezone - user's IANA zone (use `resolveTimezone` first if the
+ *   value is user-supplied).
+ */
+export function localDayKey(instant: Date, timezone: string): string {
+  const tz = resolveTimezone(timezone);
+  return toZonedTime(instant, tz).toISOString().slice(0, 10);
+}

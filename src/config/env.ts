@@ -126,6 +126,25 @@ export const env = {
     windowMs: parseInt(getEnv('RATE_LIMIT_WINDOW_MS', '900000'), 10),
     max: parseInt(getEnv('RATE_LIMIT_MAX', '100'), 10),
   },
+
+  /**
+   * Number of reverse-proxy hops in front of this process, passed straight
+   * to Express's `trust proxy` setting. Railway (and most PaaS providers)
+   * put exactly one proxy in front of the app, so `req.ip` and the
+   * `X-Forwarded-For` header are only trustworthy once Express is told how
+   * many hops to peel off. Without this, `req.ip` resolves to the proxy's
+   * own address for every request, which collapses `generalLimiter`,
+   * `authLimiter`, and the wheel limiter's IP fallback down to a single
+   * shared bucket across the entire user base — brute-force protection on
+   * login/password-reset was effectively disabled in production
+   * (CODE_REVIEW.md #11). Defaults to 1 in production (Railway's single
+   * proxy hop) and 0 (trust nothing) elsewhere; override with
+   * TRUST_PROXY_HOPS if the deployment topology differs.
+   */
+  trustProxyHops: parseInt(
+    getEnv('TRUST_PROXY_HOPS', getEnv('NODE_ENV', 'development') === 'production' ? '1' : '0'),
+    10,
+  ),
 } as const;
 
 // Validate secrets at module load time (fails fast on startup)

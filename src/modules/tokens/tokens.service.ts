@@ -1,7 +1,21 @@
 import { prisma } from '../../config/database.js';
 import { AppError } from '../../middleware/errorHandler.js';
-import type { TransactionType } from '@prisma/client';
+import type { Prisma, TransactionType } from '@prisma/client';
 import { getCachedBalance, setCachedBalance, invalidateBalance } from '../../shared/cache/balance.js';
+
+/**
+ * Either the top-level PrismaClient or an interactive-transaction client
+ * (`tx` inside a `prisma.$transaction(async (tx) => ...)` callback).
+ *
+ * Callers that are already inside their own transaction (pools, wheel,
+ * commitments, contract evaluation) MUST pass their `tx` through so the
+ * wallet write participates in that same transaction instead of opening a
+ * second, independent one — nesting `prisma.$transaction` calls silently
+ * decouples the inner write's commit from the outer transaction's, which is
+ * a correctness bug (the inner write can persist even if the outer
+ * transaction later rolls back). See CODE_REVIEW.md #10.
+ */
+type Db = typeof prisma | Prisma.TransactionClient;
 
 // ---------------------------------------------------------------------------
 // Balance
@@ -77,32 +91,44 @@ export async function getTransactions(
 // Credit tokens (atomic)
 // ---------------------------------------------------------------------------
 
+/**
+ * Credits a wallet atomically. Uses a raw, guarded `UPDATE ... RETURNING`
+ * instead of "read balance, compute newBalance in JS, write it back" — the
+ * old pattern let two concurrent writers both read the same starting
+ * balance and clobber each other's update (lost-update / double-spend race,
+ * see CODE_REVIEW.md #1). The database now performs the arithmetic, so
+ * concurrent credits/debits against the same wallet always serialize
+ * correctly regardless of how many requests race.
+ *
+ * Pass `db` (the `tx` from an enclosing `prisma.$transaction`) when calling
+ * this from code that's already inside its own transaction, so the wallet
+ * write and the caller's other writes commit or roll back together.
+ */
 export async function creditTokens(
   userId: string,
   amount: number,
   type: TransactionType,
   description?: string,
   referenceId?: string,
+  db: Db = prisma,
 ): Promise<{ balance: number }> {
   if (amount <= 0) {
     throw new AppError('Credit amount must be positive', 400);
   }
 
-  const result = await prisma.$transaction(async (tx) => {
-    const wallet = await tx.tokenWallet.findUnique({
-      where: { userId },
-    });
-
+  const run = async (tx: Db): Promise<{ balance: number }> => {
+    const wallet = await tx.tokenWallet.findUnique({ where: { userId } });
     if (!wallet) {
       throw new AppError('Token wallet not found', 404);
     }
 
-    const newBalance = wallet.balance + amount;
-
-    await tx.tokenWallet.update({
-      where: { id: wallet.id },
-      data: { balance: newBalance },
-    });
+    const updated = await tx.$queryRaw<{ balance: number }[]>`
+      UPDATE "TokenWallet"
+      SET balance = balance + ${amount}, "updatedAt" = NOW()
+      WHERE id = ${wallet.id}
+      RETURNING balance
+    `;
+    const newBalance = updated[0].balance;
 
     await tx.tokenTransaction.create({
       data: {
@@ -116,10 +142,19 @@ export async function creditTokens(
     });
 
     return { balance: newBalance };
-  });
+  };
 
+  const usingOwnTransaction = db === prisma;
+  const result = usingOwnTransaction ? await prisma.$transaction(run) : await run(db);
+
+  // Safe to invalidate even if we're inside a caller's not-yet-committed
+  // transaction — worst case is one extra DB read on the next cache miss.
   invalidateBalance(userId);
-  setCachedBalance(userId, result.balance);
+  // Only warm the cache with the new value once we know the write actually
+  // committed (i.e. we owned the transaction ourselves).
+  if (usingOwnTransaction) {
+    setCachedBalance(userId, result.balance);
+  }
   return result;
 }
 
@@ -127,36 +162,43 @@ export async function creditTokens(
 // Debit tokens (atomic)
 // ---------------------------------------------------------------------------
 
+/**
+ * Debits a wallet atomically and race-safely. The `WHERE balance >= amount`
+ * guard on the raw UPDATE means the database itself enforces "never go
+ * negative" even under concurrent debits — there is no window where two
+ * requests can both pass a balance check based on stale data and both
+ * succeed (see CODE_REVIEW.md #1).
+ */
 export async function debitTokens(
   userId: string,
   amount: number,
   type: TransactionType,
   description?: string,
   referenceId?: string,
+  db: Db = prisma,
 ): Promise<{ balance: number }> {
   if (amount <= 0) {
     throw new AppError('Debit amount must be positive', 400);
   }
 
-  const result = await prisma.$transaction(async (tx) => {
-    const wallet = await tx.tokenWallet.findUnique({
-      where: { userId },
-    });
-
+  const run = async (tx: Db): Promise<{ balance: number }> => {
+    const wallet = await tx.tokenWallet.findUnique({ where: { userId } });
     if (!wallet) {
       throw new AppError('Token wallet not found', 404);
     }
 
-    if (wallet.balance < amount) {
+    const updated = await tx.$queryRaw<{ balance: number }[]>`
+      UPDATE "TokenWallet"
+      SET balance = balance - ${amount}, "updatedAt" = NOW()
+      WHERE id = ${wallet.id} AND balance >= ${amount}
+      RETURNING balance
+    `;
+
+    if (updated.length === 0) {
       throw new AppError('Insufficient token balance', 400);
     }
 
-    const newBalance = wallet.balance - amount;
-
-    await tx.tokenWallet.update({
-      where: { id: wallet.id },
-      data: { balance: newBalance },
-    });
+    const newBalance = updated[0].balance;
 
     await tx.tokenTransaction.create({
       data: {
@@ -170,7 +212,14 @@ export async function debitTokens(
     });
 
     return { balance: newBalance };
-  });
+  };
 
+  const usingOwnTransaction = db === prisma;
+  const result = usingOwnTransaction ? await prisma.$transaction(run) : await run(db);
+
+  invalidateBalance(userId);
+  if (usingOwnTransaction) {
+    setCachedBalance(userId, result.balance);
+  }
   return result;
 }

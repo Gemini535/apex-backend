@@ -24,9 +24,13 @@ const EMAIL_PREFIX = 'email:';
 
 // ─── Twilio client (lazy, only constructed if credentials are present) ────────
 
-let twilioClient: ReturnType<typeof import('twilio')> | null = null;
+// Type-only import — erased at compile time, so it doesn't pull the package
+// into the runtime module graph until actually needed.
+type TwilioClient = import('twilio').Twilio;
 
-function getTwilioClient() {
+let twilioClient: TwilioClient | null = null;
+
+async function getTwilioClient(): Promise<TwilioClient> {
   if (twilioClient) return twilioClient;
 
   const { accountSid, authToken, phoneNumber } = env.twilio;
@@ -36,8 +40,14 @@ function getTwilioClient() {
     );
   }
 
-  // Dynamic import keeps twilio out of the bundle when not used.
-  const twilio = require('twilio') as typeof import('twilio');
+  // This package is pure ESM (`"type": "module"` in package.json, NodeNext
+  // module resolution), so `require('twilio')` throws `ReferenceError:
+  // require is not defined` every time — which was previously swallowed by
+  // the caller's try/catch and logged at `debug`, meaning SMS 2FA silently
+  // never sent a real text message even with fully valid credentials in
+  // production (CODE_REVIEW.md #8). A dynamic `import()` is the correct ESM
+  // equivalent of a lazy `require()`.
+  const { default: twilio } = await import('twilio');
   twilioClient = twilio(accountSid, authToken);
   return twilioClient;
 }
@@ -121,28 +131,33 @@ export async function comparePassword(password: string, hash: string): Promise<b
 
 /**
  * Generate a short-lived access JWT.
+ *
+ * Carries `type: 'access'` and (when provided) `sid`, the id of the Session
+ * row this token was minted for. `authenticateToken` checks both: the
+ * `type` claim prevents any other kind of token this codebase signs (e.g.
+ * the 2FA temp token) from being replayed as an access token, and `sid`
+ * lets us verify that THIS SPECIFIC session is still active rather than
+ * merely "the user has some active session somewhere" — the previous
+ * behavior meant revoking one device's session didn't actually invalidate
+ * that device's still-live access token as long as the user had any other
+ * session open elsewhere (CODE_REVIEW.md #5, #6).
  */
-export function generateAccessToken(payload: {
-  userId: string;
-  email: string;
-  username: string;
-}): string {
-  return jwt.sign(payload, env.jwt.secret, {
-    expiresIn: env.jwt.accessExpiry,
-  } as jwt.SignOptions);
-}
-
-/**
- * Generate a refresh JWT (uses separate secret from access tokens).
- */
-export function generateRefreshAccessToken(payload: {
-  userId: string;
-  email: string;
-  username: string;
-}): string {
-  return jwt.sign(payload, env.jwt.refreshSecret, {
-    expiresIn: env.jwt.refreshExpiry,
-  } as jwt.SignOptions);
+export function generateAccessToken(
+  payload: {
+    userId: string;
+    email: string;
+    username: string;
+  },
+  sessionId?: string,
+): string {
+  return jwt.sign(
+    { ...payload, type: 'access' as const, sid: sessionId },
+    env.jwt.secret,
+    {
+      expiresIn: env.jwt.accessExpiry,
+      algorithm: 'HS256',
+    } as jwt.SignOptions,
+  );
 }
 
 /**
@@ -152,21 +167,46 @@ export function generateRefreshToken(): string {
   return crypto.randomBytes(40).toString('hex');
 }
 
+export interface RefreshTokenResult {
+  userId: string;
+  sessionId: string;
+}
+
 /**
- * Look up a session by refresh token and verify it has not expired.
- * The refresh token is an opaque random string stored in the DB.
- * The access JWT (signed with JWT_SECRET) proves identity;
- * the refresh token (stored in DB, never exposed in JWT) proves session validity.
- * JWT_REFRESH_SECRET is used to sign an additional session token layer.
+ * Look up a session by refresh token and verify it is still valid.
+ *
+ * The refresh token is an opaque random string stored in the DB (not a
+ * JWT) — the access JWT (signed with JWT_SECRET) proves identity for API
+ * calls, and this opaque token (never embedded in any JWT) proves session
+ * validity across the rotation described below.
+ *
+ * Refresh-token reuse detection: on rotation (see `refresh` in
+ * auth.controller.ts), the OLD session row is marked `revokedAt` rather
+ * than deleted outright. If a request ever presents a refresh token whose
+ * session already has `revokedAt` set, that's a replay of an
+ * already-rotated token — the standard signal that a refresh token was
+ * stolen. We respond by revoking every session belonging to that user,
+ * logging both the legitimate holder of the newest token and the attacker
+ * out, rather than quietly returning 401 and letting the attacker keep
+ * trying (CODE_REVIEW.md #25).
  */
 export async function verifyRefreshToken(
   token: string
-): Promise<{ userId: string } | null> {
+): Promise<RefreshTokenResult | null> {
   const session = await prisma.session.findUnique({
     where: { refreshToken: token },
   });
 
   if (!session) {
+    return null;
+  }
+
+  if (session.revokedAt) {
+    logger.warn(
+      { userId: session.userId, sessionId: session.id },
+      'Refresh token reuse detected — revoking all sessions for this user',
+    );
+    await prisma.session.deleteMany({ where: { userId: session.userId } });
     return null;
   }
 
@@ -176,7 +216,7 @@ export async function verifyRefreshToken(
     return null;
   }
 
-  return { userId: session.userId };
+  return { userId: session.userId, sessionId: session.id };
 }
 
 /**
@@ -205,11 +245,21 @@ export async function setupTOTP(userId: string): Promise<{
     hashedBackupCodes.push(await bcrypt.hash(code, 10));
   }
 
-  // Store secret (unencrypted for speakeasy verify) and hashed backup codes
+  // Store secret (unencrypted for speakeasy verify) and hashed backup codes.
+  //
+  // The `update` branch here used to omit `backupCodes` entirely. Every
+  // user gets an empty TwoFactorSetting row created at registration/OAuth
+  // signup (`twoFactor: { create: {} }`), so in practice this upsert took
+  // the `update` branch for essentially every real account — meaning the
+  // backup codes handed back to the client below were silently never
+  // persisted at all. Combined with nothing ever calling
+  // `verifyBackupCode`, this made backup codes a purely cosmetic feature
+  // with no working recovery path whatsoever (CODE_REVIEW.md #7).
   await prisma.twoFactorSetting.upsert({
     where: { userId },
     update: {
       totpSecret: secret.base32,
+      backupCodes: hashedBackupCodes,
     },
     create: {
       userId,
@@ -246,6 +296,38 @@ export async function verifyTOTP(userId: string, code: string): Promise<boolean>
 }
 
 /**
+ * Verify a one-time backup code and, if valid, consume it (backup codes are
+ * single-use). `setupTOTP` generates and bcrypt-hashes 10 of these, but
+ * nothing previously ever checked them at login or account-recovery time —
+ * a user who lost their authenticator device had no working recovery path
+ * despite the API handing back backup codes as if they were usable
+ * (CODE_REVIEW.md #7). This is the missing verification half of that
+ * feature; callers should try `verifyTOTP` first and fall back to this.
+ */
+export async function verifyBackupCode(userId: string, code: string): Promise<boolean> {
+  const twoFactor = await prisma.twoFactorSetting.findUnique({ where: { userId } });
+  if (!twoFactor || twoFactor.backupCodes.length === 0) {
+    return false;
+  }
+
+  const normalized = code.trim().toUpperCase();
+
+  for (const hashed of twoFactor.backupCodes) {
+    // eslint-disable-next-line no-await-in-loop -- backup codes are few (10) and this only runs on the rare recovery path
+    if (await bcrypt.compare(normalized, hashed)) {
+      const remaining = twoFactor.backupCodes.filter((c) => c !== hashed);
+      await prisma.twoFactorSetting.update({
+        where: { userId },
+        data: { backupCodes: remaining },
+      });
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Generate and store a 6-digit SMS verification code for the given phone number.
  * Returns the plaintext code. Persists to the Postgres-backed cache so the
  * code survives restarts and works across horizontally scaled instances.
@@ -259,7 +341,7 @@ export async function sendSMSCode(phoneNumber: string): Promise<string> {
   // Send via Twilio when configured. In dev (no credentials) we fall back to
   // logging only — the durable cache still works for verification.
   try {
-    const client = getTwilioClient();
+    const client = await getTwilioClient();
     await client.messages.create({
       body: `Your Apex verification code: ${code}. It expires in 5 minutes.`,
       from: env.twilio.phoneNumber,
@@ -384,11 +466,28 @@ export async function verifyGoogleToken(
 
 /**
  * Generate a short-lived JWT for the intermediate 2FA pending step.
+ *
+ * Signed with `JWT_REFRESH_SECRET` — a *different* secret than access
+ * tokens (`JWT_SECRET`) — rather than reusing the access-token secret. This
+ * used to be the same secret with only a `purpose` claim telling temp
+ * tokens and access tokens apart, and `authenticateToken` never actually
+ * checked that claim: it just verified the signature and trusted any
+ * payload with a `userId`. Since the temp token is issued from `/auth/login`
+ * before the 2FA code is checked, an attacker who has only the victim's
+ * password (enough to receive a temp token) could use it directly as a
+ * Bearer access token against every protected endpoint as long as the
+ * victim had any other active session — a full 2FA bypass
+ * (CODE_REVIEW.md #5). Using a distinct signing secret means a temp token
+ * fails signature verification outright if ever presented to
+ * `authenticateToken` (which only ever verifies with `JWT_SECRET`), on top
+ * of the `type`/`purpose` claim check now enforced there as defense in depth.
  */
 export function generate2FATempToken(userId: string): string {
-  return jwt.sign({ userId, purpose: '2fa_pending' } as Record<string, unknown>, env.jwt.secret, {
-    expiresIn: '5m',
-  });
+  return jwt.sign(
+    { userId, purpose: '2fa_pending' } as Record<string, unknown>,
+    env.jwt.refreshSecret,
+    { expiresIn: '5m', algorithm: 'HS256' },
+  );
 }
 
 /**
@@ -396,7 +495,7 @@ export function generate2FATempToken(userId: string): string {
  */
 export function verify2FATempToken(token: string): { userId: string } | null {
   try {
-    const payload = jwt.verify(token, env.jwt.secret) as Record<string, unknown>;
+    const payload = jwt.verify(token, env.jwt.refreshSecret, { algorithms: ['HS256'] }) as Record<string, unknown>;
     if (payload.purpose !== '2fa_pending' || typeof payload.userId !== 'string') {
       return null;
     }

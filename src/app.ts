@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { env } from './config/env.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 import { errorHandler, requestIdMiddleware } from './middleware/errorHandler.js';
 import { sanitizeInput } from './middleware/sanitize.js';
@@ -35,6 +36,12 @@ import screentimeRouter from './modules/screentime/screentime.routes.js';
 import devicesRouter from './modules/devices/devices.routes.js';
 
 const app = express();
+
+// Tell Express how many reverse-proxy hops sit in front of it so req.ip and
+// X-Forwarded-For are resolved correctly — required for the rate limiters
+// below to key off the real client IP instead of the proxy's IP (see
+// env.ts's `trustProxyHops` docstring / CODE_REVIEW.md #11).
+app.set('trust proxy', env.trustProxyHops);
 
 // ─── Stripe webhook (must be BEFORE express.json() for raw body) ─────────────
 

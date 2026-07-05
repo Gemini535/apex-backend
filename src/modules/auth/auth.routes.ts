@@ -7,6 +7,7 @@ import {
   login as loginValidation,
   oauth as oauthValidation,
   verify2FA as verify2FAValidation,
+  send2FALoginCode as send2FALoginCodeValidation,
   setupSMS2FA as setupSMS2FAValidation,
   refreshToken as refreshTokenValidation,
   forgotPassword,
@@ -16,6 +17,7 @@ import {
 import {
   register,
   login,
+  send2FALoginCode,
   verify2FALogin,
   appleAuth,
   googleAuth,
@@ -45,6 +47,9 @@ const router = Router();
 
 router.post('/register', validate(registerValidation), register);
 router.post('/login', authLimiter, validate(loginValidation), login);
+// Rate-limited: sends a real SMS/email, so it must be protected from spam
+// exactly like login/password-reset (see rateLimiter.ts's authLimiter).
+router.post('/login/2fa/send', authLimiter, validate(send2FALoginCodeValidation), send2FALoginCode);
 router.post('/login/2fa', authLimiter, validate(verify2FAValidation), verify2FALogin);
 router.post('/apple', validate(oauthValidation), appleAuth);
 router.post('/google', validate(oauthValidation), googleAuth);
@@ -60,13 +65,17 @@ router.post('/verify-email', authLimiter, validate(verifyEmailBody), verifyEmail
 
 // ─── Authenticated 2FA routes ───────────────────────────────────────────────
 
+// authLimiter added to every code-verifying/code-sending route here, not
+// just login — these all either brute-forceable a 6-digit code or trigger a
+// real SMS/email send, so they need the same defense-in-depth as
+// login/password-reset (previously none of them were rate-limited at all).
 router.post('/2fa/setup/totp', authenticateToken, setup2FATotp);
-router.post('/2fa/verify/totp', authenticateToken, validate(verify2FAValidation), verifyAndEnable2FATotp);
-router.post('/2fa/setup/sms', authenticateToken, validate(setupSMS2FAValidation), setup2FASMS);
-router.post('/2fa/verify/sms', authenticateToken, validate(verify2FAValidation), verifyAndEnable2FASMS);
-router.post('/2fa/setup/email', authenticateToken, setup2FAEmail);
-router.post('/2fa/verify/email', authenticateToken, validate(verify2FAValidation), verifyAndEnable2FAEmail);
-router.delete('/2fa', authenticateToken, validate(verify2FAValidation), disable2FA);
+router.post('/2fa/verify/totp', authLimiter, authenticateToken, validate(verify2FAValidation), verifyAndEnable2FATotp);
+router.post('/2fa/setup/sms', authLimiter, authenticateToken, validate(setupSMS2FAValidation), setup2FASMS);
+router.post('/2fa/verify/sms', authLimiter, authenticateToken, validate(verify2FAValidation), verifyAndEnable2FASMS);
+router.post('/2fa/setup/email', authLimiter, authenticateToken, setup2FAEmail);
+router.post('/2fa/verify/email', authLimiter, authenticateToken, validate(verify2FAValidation), verifyAndEnable2FAEmail);
+router.delete('/2fa', authLimiter, authenticateToken, validate(verify2FAValidation), disable2FA);
 
 // ─── Session management ─────────────────────────────────────────────────────
 

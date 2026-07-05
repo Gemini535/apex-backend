@@ -14,13 +14,30 @@ export interface SessionInfo {
 }
 
 /**
- * Lists all active sessions for a user.
+ * Password-reset and email-verification tokens are stored as rows in this
+ * same `Session` table (prefixed `reset:`/`verify-email:` on `refreshToken`)
+ * rather than a dedicated table. `listSessions` must exclude them — they
+ * used to show up in a user's "active sessions" list as a phantom logged-in
+ * device whenever a password reset or verification email was pending
+ * (CODE_REVIEW.md #16).
+ */
+const PSEUDO_SESSION_PREFIXES = ['reset:', 'verify-email:'];
+
+/**
+ * Lists all genuinely active device sessions for a user — excludes expired
+ * rows, rows revoked by refresh-token rotation (see auth.service.ts's
+ * `verifyRefreshToken`), and the password-reset/email-verification pseudo
+ * sessions described above.
  */
 export async function listSessions(userId: string, currentRefreshToken?: string): Promise<SessionInfo[]> {
   const sessions = await prisma.session.findMany({
     where: {
       userId,
       expiresAt: { gt: new Date() },
+      revokedAt: null,
+      NOT: {
+        OR: PSEUDO_SESSION_PREFIXES.map((prefix) => ({ refreshToken: { startsWith: prefix } })),
+      },
     },
     orderBy: { createdAt: 'desc' },
   });

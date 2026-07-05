@@ -142,33 +142,49 @@ export function sendPushToToken(
   void sendPushToTokenInner(token, payload);
 }
 
+/** How long APNs should keep retrying delivery to an offline device before
+ * giving up, in seconds. Without an explicit `apns-expiration`, APNs treats
+ * the push as immediate-only and won't store-and-forward it once the
+ * device reconnects (CODE_REVIEW.md #34). */
+const APNS_EXPIRATION_SECONDS = 24 * 60 * 60; // 1 day
+
 async function sendPushToTokenInner(
   token: string,
   payload: ApplePushPayload,
 ): Promise<void> {
-  const body = JSON.stringify({
-    aps: {
-      alert: payload.alert,
-      sound: payload.sound ?? 'default',
-      badge: payload.badge,
-      category: payload.category,
-      ...payload.customData,
-    },
-  });
-
-  const headers: http2.OutgoingHttpHeaders = {
-    ':method': 'POST',
-    ':path': `/3/device/${token}`,
-    ':scheme': 'https',
-    ':authority': new URL(getApnsHost()).host,
-    'authorization': `bearer ${getJwt()}`,
-    'apns-topic': env.apns.bundleId,
-    'apns-push-type': 'alert',
-    'content-type': 'application/json',
-    'content-length': Buffer.byteLength(body),
-  };
-
   try {
+    const body = JSON.stringify({
+      aps: {
+        alert: payload.alert,
+        sound: payload.sound ?? 'default',
+        badge: payload.badge,
+        category: payload.category,
+        ...payload.customData,
+      },
+    });
+
+    // Building these headers calls getJwt(), which can throw synchronously
+    // (e.g. a missing/invalid .p8 key file makes signJwt()'s
+    // crypto.createPrivateKey('') throw). That used to happen OUTSIDE this
+    // try block — since this is an async function called as
+    // `void sendPushToTokenInner(...)`, a synchronous throw here became an
+    // unhandled promise rejection (caught only by the process-wide handler
+    // in server.ts) instead of a clean, contextual log line per failed
+    // send (CODE_REVIEW.md #33). Moving the header construction inside the
+    // try block fixes that.
+    const headers: http2.OutgoingHttpHeaders = {
+      ':method': 'POST',
+      ':path': `/3/device/${token}`,
+      ':scheme': 'https',
+      ':authority': new URL(getApnsHost()).host,
+      'authorization': `bearer ${getJwt()}`,
+      'apns-topic': env.apns.bundleId,
+      'apns-push-type': 'alert',
+      'apns-expiration': String(Math.floor(Date.now() / 1000) + APNS_EXPIRATION_SECONDS),
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(body),
+    };
+
     const session = getClient();
 
     await new Promise<void>((resolve, reject) => {

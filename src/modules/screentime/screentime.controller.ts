@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { AppError } from '../../middleware/errorHandler.js';
 import * as service from './screentime.service.js';
 import type { AppCategory } from '@prisma/client';
+import { assertValidRange } from '../../shared/dateRange.js';
 
 export async function uploadBatch(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -48,9 +49,7 @@ export async function getRange(req: Request, res: Response, next: NextFunction):
     }
     const fromDate = new Date(from);
     const toDate = new Date(to);
-    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
-      throw new AppError('Invalid date format for from or to', 400);
-    }
+    assertValidRange(fromDate, toDate);
     res.json(await service.getRangeData(req.user!.userId, fromDate, toDate));
   } catch (error) {
     next(error);
@@ -64,14 +63,11 @@ export async function getApps(req: Request, res: Response, next: NextFunction): 
     if (typeof req.query.from === 'string' && typeof req.query.to === 'string') {
       fromDate = new Date(req.query.from);
       toDate = new Date(req.query.to);
-      if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
-        throw new AppError('Invalid date format', 400);
-      }
+      assertValidRange(fromDate, toDate);
     } else {
-      fromDate = new Date();
-      fromDate.setHours(0, 0, 0, 0);
-      toDate = new Date();
-      toDate.setHours(23, 59, 59, 999);
+      // Default to "today" in the user's own timezone, not the server
+      // process's local timezone (see getDefaultTodayRange).
+      ({ from: fromDate, to: toDate } = await service.getDefaultTodayRange(req.user!.userId));
     }
     res.json(await service.getAppsBreakdown(req.user!.userId, fromDate, toDate));
   } catch (error) {
@@ -86,14 +82,9 @@ export async function getCategories(req: Request, res: Response, next: NextFunct
     if (typeof req.query.from === 'string' && typeof req.query.to === 'string') {
       fromDate = new Date(req.query.from);
       toDate = new Date(req.query.to);
-      if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
-        throw new AppError('Invalid date format', 400);
-      }
+      assertValidRange(fromDate, toDate);
     } else {
-      fromDate = new Date();
-      fromDate.setHours(0, 0, 0, 0);
-      toDate = new Date();
-      toDate.setHours(23, 59, 59, 999);
+      ({ from: fromDate, to: toDate } = await service.getDefaultTodayRange(req.user!.userId));
     }
     res.json(await service.getCategoriesBreakdown(req.user!.userId, fromDate, toDate));
   } catch (error) {

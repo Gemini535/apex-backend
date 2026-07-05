@@ -85,11 +85,39 @@ export async function activatePowerUp(
     case 'DOUBLE_DOWN':
       expiresAt = new Date(now.getTime() + DOUBLE_DOWN_DURATION_MS);
       break;
-    case 'BOUNTY':
+    case 'BOUNTY': {
       if (!targetPoolId || !targetUserId) {
         throw new AppError('Bounty requires a target pool and user', 400);
       }
+      if (targetUserId === userId) {
+        throw new AppError('You cannot place a bounty on yourself', 400);
+      }
+
+      // Previously this only checked that targetPoolId/targetUserId were
+      // non-empty strings — nothing verified the caller and the target were
+      // actually participants of that pool, so a bounty could be pointed at
+      // any arbitrary pool/user pair with no relationship to each other
+      // (CODE_REVIEW.md #19).
+      const pool = await prisma.pool.findUnique({
+        where: { id: targetPoolId },
+        include: { participants: { where: { leftAt: null } } },
+      });
+      if (!pool) {
+        throw new AppError('Target pool not found', 404);
+      }
+      if (pool.status !== 'OPEN' && pool.status !== 'ACTIVE') {
+        throw new AppError('Bounties can only target an open or active pool', 400);
+      }
+      const callerIsParticipant = pool.participants.some((p) => p.userId === userId);
+      const targetIsParticipant = pool.participants.some((p) => p.userId === targetUserId);
+      if (!callerIsParticipant) {
+        throw new AppError('You must be a participant in the target pool to place a bounty', 403);
+      }
+      if (!targetIsParticipant) {
+        throw new AppError('Bounty target must be a participant in the target pool', 400);
+      }
       break;
+    }
   }
 
   await prisma.powerUp.update({

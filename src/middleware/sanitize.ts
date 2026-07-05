@@ -1,12 +1,34 @@
 import type { Request, Response, NextFunction } from 'express';
 
 /**
+ * Field names that must never be mutated by sanitization. Stripping
+ * characters like `<`, `>`, `"`, `'`, `&`, or backtick from a password
+ * before it's hashed silently changes the password the user thinks they
+ * set — and the password-strength validator actively *requires* several of
+ * those characters (`!@#$%^&*()_+-=[]{}|;:,.<>/?`), so this used to corrupt
+ * a meaningful fraction of legitimately "strong" passwords on registration
+ * and password reset with no error surfaced to the user. The same problem
+ * applies to tokens, secrets, and one-time codes: mutating them just
+ * corrupts a value that's compared byte-for-byte later. See
+ * CODE_REVIEW.md #12.
+ */
+const SENSITIVE_KEY_PATTERN = /password|token|secret|code|authorization|creditcard|cvv/i;
+
+/**
  * Recursively strips HTML tags and trims whitespace from string values in an
  * object. Numbers, booleans, dates, and null pass through untouched. This runs
  * AFTER express-validator (which coerces types and checks formats) so we trust
  * the shape but still defensively encode anything that reaches the DB layer.
+ *
+ * `key` is the property name this value was found under (if any) — passed
+ * down through recursion so sensitive fields can be left completely
+ * untouched regardless of nesting depth.
  */
-function sanitizeValue(value: unknown): unknown {
+function sanitizeValue(value: unknown, key?: string): unknown {
+  if (key && SENSITIVE_KEY_PATTERN.test(key)) {
+    return value;
+  }
+
   if (typeof value === 'string') {
     // Strip any HTML/XML tags then collapse whitespace. escape-html would
     // encode entities; here we drop tags entirely so stored text stays clean.
@@ -17,12 +39,12 @@ function sanitizeValue(value: unknown): unknown {
     return stripped;
   }
   if (Array.isArray(value)) {
-    return value.map(sanitizeValue);
+    return value.map((v) => sanitizeValue(v, key));
   }
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = sanitizeValue(val);
+    for (const [k, val] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = sanitizeValue(val, k);
     }
     return out;
   }
@@ -40,7 +62,7 @@ function sanitizeQueryOrParams(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, val] of Object.entries(original)) {
-    out[key] = sanitizeValue(val);
+    out[key] = sanitizeValue(val, key);
   }
   return out;
 }

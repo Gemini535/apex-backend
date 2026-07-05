@@ -11,6 +11,12 @@ interface SocketUser {
   username: string;
 }
 
+/** Raw decoded shape of the access-token JWT (see middleware/auth.ts). */
+interface AccessTokenClaims extends SocketUser {
+  type?: string;
+  sid?: string;
+}
+
 interface AuthenticatedSocket extends Socket {
   user: SocketUser;
 }
@@ -37,8 +43,21 @@ export function initializeSocket(server: HttpServer): Server {
     }
 
     try {
-      const payload = jwt.verify(token, env.jwt.secret) as SocketUser;
-      (socket as AuthenticatedSocket).user = payload;
+      // Pin the algorithm (see middleware/auth.ts for the same rationale)
+      // and reject anything that isn't a genuine access token — e.g. the
+      // 2FA temp token, which is now signed with a different secret
+      // entirely, so it would already fail the signature check above, but
+      // the explicit `type` check keeps this consistent with
+      // authenticateToken as defense in depth.
+      const payload = jwt.verify(token, env.jwt.secret, { algorithms: ['HS256'] }) as AccessTokenClaims;
+      if (payload.type !== 'access') {
+        return next(new Error('Invalid token'));
+      }
+      (socket as AuthenticatedSocket).user = {
+        userId: payload.userId,
+        email: payload.email,
+        username: payload.username,
+      };
       next();
     } catch {
       next(new Error('Invalid token'));

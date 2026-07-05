@@ -73,12 +73,8 @@ export async function evaluateContract(
       return null;
     }
 
-    const user = await tx.user.findUnique({
-      where: { id: contract.userId },
-      select: { timezone: true },
-    });
-
-    // Slice the contract window into local days and sum focus seconds per day.
+    // Slice the contract window into local days (timezone-aware, per
+    // `getRangeData`) and sum focus seconds per day.
     const dailySummaries = await getRangeData(
       contract.userId,
       contract.startDate,
@@ -101,7 +97,8 @@ export async function evaluateContract(
     const hitRate = daysHit / daysTotal;
     const met = hitRate >= threshold;
 
-    // Fetch the wallet once so we can compute balanceAfter for the ledger.
+// Fetch the wallet once so the FORFEITED branch (which doesn't move any
+    // money) can still write a ledger marker with an accurate balanceAfter.
     const wallet = await tx.tokenWallet.findUnique({
       where: { userId: contract.userId },
     });
@@ -110,31 +107,31 @@ export async function evaluateContract(
     }
 
     if (met) {
-      // Credit the pledge back. creditTokens is atomic and ledger-safe.
+      // Credit the pledge back. `tx` is threaded through so this write
+      // commits/rolls back atomically together with the contract's status
+      // update below — previously this called `creditTokens` without `tx`,
+      // which opened its OWN independent transaction; if anything after it
+      // in this function later failed, the credit would already have
+      // committed while the contract stayed ACTIVE, and a retry could pay
+      // the pledge out a second time (CODE_REVIEW.md #10). Using
+      // 'CONTRACT_PAYOUT' as the ledger type here (rather than a generic
+      // 'EARNED') also means this is the single, correctly-categorized
+      // ledger row for the payout — the old code additionally wrote a
+      // second manual 'CONTRACT_PAYOUT' transaction for the same amount,
+      // double-counting the payout in the user's transaction history even
+      // though the wallet balance only actually increased once.
       await creditTokens(
         contract.userId,
         contract.pledgeAmount,
-        'EARNED',
-        `Commitment completed: ${contract.name}`,
+        'CONTRACT_PAYOUT',
+        `Payout for completed commitment: ${contract.name}`,
         contract.id,
+        tx,
       );
-
-      const payoutBalanceAfter = wallet.balance + contract.pledgeAmount;
 
       await tx.commitmentContract.update({
         where: { id: contractId },
         data: { status: 'COMPLETED', completedAt: new Date() },
-      });
-
-      await tx.tokenTransaction.create({
-        data: {
-          walletId: wallet.id,
-          amount: contract.pledgeAmount,
-          type: 'CONTRACT_PAYOUT',
-          description: `Payout for completed commitment: ${contract.name}`,
-          balanceAfter: payoutBalanceAfter,
-          referenceId: contractId,
-        },
       });
 
       logger.info(

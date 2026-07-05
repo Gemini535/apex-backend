@@ -1,7 +1,5 @@
 import { prisma } from '../../config/database.js';
-import { AppError } from '../../middleware/errorHandler.js';
-import { creditTokens } from '../tokens/tokens.service.js';
-import { invalidateBalance } from '../../shared/cache/balance.js';
+import { creditTokens, debitTokens } from '../tokens/tokens.service.js';
 import type { PowerUpType } from '@prisma/client';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -50,143 +48,129 @@ export interface WheelSpinResult {
  * Spin the token wheel. Costs 10 tokens and guarantees at least 15 tokens back.
  * May also drop a power-up or cosmetic item.
  *
- * The spin cost is debited inline here (rather than via tokens.service) to keep
- * the dependency one-directional: wheel -> tokens. creditTokens is still used
- * for rewards.
+ * The whole spin — cost debit, reward roll, and reward grant — runs inside a
+ * single transaction so a crash mid-spin can never charge the cost without
+ * granting a reward (or vice versa). The debit itself goes through
+ * `tokens.service`'s atomic, race-safe helper (guarded raw UPDATE) rather
+ * than a hand-rolled read-then-write, which was a lost-update/double-spend
+ * race under concurrent spins (CODE_REVIEW.md #1).
  */
 export async function spinWheel(userId: string): Promise<WheelSpinResult> {
-  const wallet = await prisma.tokenWallet.findFirst({ where: { userId } });
-  if (!wallet || wallet.balance < WHEEL_COST) {
-    throw new AppError('Not enough tokens to spin the wheel', 400);
-  }
+  return prisma.$transaction(async (tx) => {
+    await debitTokens(userId, WHEEL_COST, 'SPENT', 'Token wheel spin', undefined, tx);
 
-  const newBalance = wallet.balance - WHEEL_COST;
-  await prisma.tokenWallet.update({
-    where: { id: wallet.id },
-    data: { balance: newBalance },
-  });
-  await prisma.tokenTransaction.create({
-    data: {
-      walletId: wallet.id,
-      amount: -WHEEL_COST,
-      type: 'SPENT',
-      description: 'Token wheel spin',
-      balanceAfter: newBalance,
-    },
-  });
-  invalidateBalance(userId);
+    // Determine reward: 70% credits only, 20% power-up, 10% cosmetic
+    const roll = Math.random() * 100;
 
-  // Determine reward: 70% credits only, 20% power-up, 10% cosmetic
-  const roll = Math.random() * 100;
+    if (roll < 70) {
+      const bonus = Math.floor(Math.random() * 11); // 0-10 bonus
+      const totalCredits = BASELINE_CREDIT_REWARD + bonus;
+      await creditTokens(userId, totalCredits, 'EARNED', 'Token wheel spin', undefined, tx);
 
-  if (roll < 70) {
-    const bonus = Math.floor(Math.random() * 11); // 0-10 bonus
-    const totalCredits = BASELINE_CREDIT_REWARD + bonus;
-    await creditTokens(userId, totalCredits, 'EARNED', 'Token wheel spin');
+      await tx.wheelSpin.create({
+        data: {
+          userId,
+          cost: WHEEL_COST,
+          rewardType: 'credits',
+          rewardAmount: totalCredits,
+        },
+      });
 
-    await prisma.wheelSpin.create({
-      data: {
-        userId,
-        cost: WHEEL_COST,
-        rewardType: 'credits',
-        rewardAmount: totalCredits,
-      },
-    });
+      return { rewardType: 'credits', credits: totalCredits };
+    }
 
-    return { rewardType: 'credits', credits: totalCredits };
-  }
+    if (roll < 90) {
+      // Power-up drop
+      const powerUp = rollWeightedPowerUp();
+      await tx.powerUp.create({
+        data: {
+          userId,
+          type: powerUp.type,
+          quantity: 1,
+        },
+      });
 
-  if (roll < 90) {
-    // Power-up drop
-    const powerUp = rollWeightedPowerUp();
-    await prisma.powerUp.create({
-      data: {
-        userId,
-        type: powerUp.type,
-        quantity: 1,
-      },
-    });
+      await tx.wheelSpin.create({
+        data: {
+          userId,
+          cost: WHEEL_COST,
+          rewardType: 'power_up',
+          rewardId: powerUp.type,
+          rewardAmount: 0,
+        },
+      });
 
-    await prisma.wheelSpin.create({
-      data: {
-        userId,
-        cost: WHEEL_COST,
+      return {
         rewardType: 'power_up',
-        rewardId: powerUp.type,
-        rewardAmount: 0,
+        credits: 0,
+        powerUp: {
+          type: powerUp.type,
+          description: getPowerUpDescription(powerUp.type),
+        },
+      };
+    }
+
+    // Cosmetic drop
+    const cosmetic = COSMETIC_DROPS[Math.floor(Math.random() * COSMETIC_DROPS.length)];
+
+    let cosmeticItem = await tx.cosmeticItem.findUnique({
+      where: { name: cosmetic.name },
+    });
+    if (!cosmeticItem) {
+      cosmeticItem = await tx.cosmeticItem.create({
+        data: {
+          name: cosmetic.name,
+          type: cosmetic.type,
+          rarity: cosmetic.rarity,
+          price: 0, // wheel-exclusive
+        },
+      });
+    }
+
+    const existing = await tx.userCosmetic.findUnique({
+      where: {
+        userId_cosmeticId: {
+          userId,
+          cosmeticId: cosmeticItem.id,
+        },
       },
     });
 
-    return {
-      rewardType: 'power_up',
-      credits: 0,
-      powerUp: {
-        type: powerUp.type,
-        description: getPowerUpDescription(powerUp.type),
-      },
-    };
-  }
+    if (existing) {
+      // Duplicate cosmetic = 20 tokens compensation
+      await creditTokens(userId, 20, 'EARNED', `Duplicate cosmetic: ${cosmetic.name}`, undefined, tx);
+      await tx.wheelSpin.create({
+        data: {
+          userId,
+          cost: WHEEL_COST,
+          rewardType: 'cosmetic',
+          rewardId: cosmeticItem.id,
+          rewardAmount: 20,
+        },
+      });
+      return { rewardType: 'cosmetic', credits: 20, cosmetic };
+    }
 
-  // Cosmetic drop
-  const cosmetic = COSMETIC_DROPS[Math.floor(Math.random() * COSMETIC_DROPS.length)];
-
-  let cosmeticItem = await prisma.cosmeticItem.findUnique({
-    where: { name: cosmetic.name },
-  });
-  if (!cosmeticItem) {
-    cosmeticItem = await prisma.cosmeticItem.create({
+    await tx.userCosmetic.create({
       data: {
-        name: cosmetic.name,
-        type: cosmetic.type,
-        rarity: cosmetic.rarity,
-        price: 0, // wheel-exclusive
-      },
-    });
-  }
-
-  const existing = await prisma.userCosmetic.findUnique({
-    where: {
-      userId_cosmeticId: {
         userId,
         cosmeticId: cosmeticItem.id,
+        equipped: false,
       },
-    },
-  });
+    });
 
-  if (existing) {
-    // Duplicate cosmetic = 20 tokens compensation
-    await creditTokens(userId, 20, 'EARNED', `Duplicate cosmetic: ${cosmetic.name}`);
-    await prisma.wheelSpin.create({
+    await tx.wheelSpin.create({
       data: {
         userId,
         cost: WHEEL_COST,
         rewardType: 'cosmetic',
         rewardId: cosmeticItem.id,
-        rewardAmount: 20,
+        rewardAmount: 0,
       },
     });
-    return { rewardType: 'cosmetic', credits: 20, cosmetic };
-  }
 
-  await prisma.userCosmetic.create({
-    data: {
-      userId,
-      cosmeticId: cosmeticItem.id,
-      equipped: false,
-    },
+    return { rewardType: 'cosmetic', credits: 0, cosmetic };
   });
-
-  await prisma.wheelSpin.create({
-    data: {
-      userId,
-      cost: WHEEL_COST,
-      rewardType: 'cosmetic',
-      rewardId: cosmeticItem.id,
-      rewardAmount: 0,
-    },
-  });
-
-  return { rewardType: 'cosmetic', credits: 0, cosmetic };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

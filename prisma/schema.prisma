@@ -82,6 +82,16 @@ model Session {
   expiresAt    DateTime
   createdAt    DateTime @default(now())
 
+  /// Set when this session's refresh token has been rotated away (used once
+  /// to mint a new session) rather than hard-deleted. Keeping the row around
+  /// lets `verifyRefreshToken` detect a *replay* of an already-used refresh
+  /// token — the standard signal that a refresh token was stolen — and
+  /// respond by revoking every session for the user (see CODE_REVIEW.md #25).
+  /// A session with `revokedAt` set is never treated as active/authenticating.
+  revokedAt    DateTime?
+  /// The id of the session that replaced this one on rotation, for audit trails.
+  replacedById String?
+
   @@index([userId])
   @@index([refreshToken])
 }

@@ -25,3 +25,9 @@ export const blockUser = [
     .isUUID()
     .withMessage('User ID must be a valid UUID'),
 ];
+
+export const unblockUser = [
+  param('userId')
+    .isUUID()
+    .withMessage('User ID must be a valid UUID'),
+];

@@ -50,16 +50,21 @@ export async function listPoolsHandler(req: Request, res: Response, next: NextFu
 export async function settlePoolHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const userId = req.user!.userId;
-    const { winnerUserId } = req.body;
-    if (!winnerUserId) throw new AppError('winnerUserId is required', 400);
 
-    // Verify the caller is the pool creator
+    // The outcome is now fully data-derived from real participant activity
+    // (see settlePool) rather than a client-supplied "winnerUserId", so
+    // there's no fraud risk in *who* triggers settlement — only an
+    // authorization concern that a random third party shouldn't be able to.
+    // Allow the creator or any (past or present) participant to trigger it,
+    // so a pool isn't stranded forever if the creator goes AWOL.
     const pool = await getPool(req.params.poolId);
-    if (pool.creatorId !== userId) {
-      throw new AppError('Only the pool creator can settle the pool', 403);
+    const isCreator = pool.creatorId === userId;
+    const isParticipant = pool.participants.some((p) => p.userId === userId);
+    if (!isCreator && !isParticipant) {
+      throw new AppError('Only the pool creator or a participant can settle the pool', 403);
     }
 
-    res.json(await settlePool(req.params.poolId, winnerUserId));
+    res.json(await settlePool(req.params.poolId));
   } catch (err) {
     next(err);
   }

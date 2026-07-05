@@ -25,7 +25,7 @@ describe('pools.controller — settle authorization', () => {
     await prisma.user.delete({ where: { id: testUserId } }).catch(() => {});
   });
 
-  it('only pool creator can settle', async () => {
+  it('only the pool creator or a participant can trigger settlement', async () => {
     const { settlePoolHandler } = await import('./pools.controller.js');
     const { createPool } = await import('./pools.service.js');
 
@@ -41,10 +41,13 @@ describe('pools.controller — settle authorization', () => {
       },
     });
 
+    // settlePool no longer accepts a client-supplied winner — the outcome is
+    // fully data-derived (see pools.service.ts), so there's nothing left to
+    // put in the body for this endpoint.
     const mockReq = {
       user: { userId: otherUser.id, email: '', username: '' },
       params: { poolId: pool.id },
-      body: { winnerUserId: testUserId },
+      body: {},
     } as any;
     const mockRes = { json: vi.fn(), status: vi.fn().mockReturnThis() } as any;
     const mockNext = vi.fn();
@@ -53,7 +56,7 @@ describe('pools.controller — settle authorization', () => {
 
     expect(mockNext).toHaveBeenCalled();
     const error = mockNext.mock.calls[0][0];
-    expect(error.message).toBe('Only the pool creator can settle the pool');
+    expect(error.message).toBe('Only the pool creator or a participant can settle the pool');
     expect(error.statusCode).toBe(403);
 
     await prisma.user.delete({ where: { id: otherUser.id } }).catch(() => {});

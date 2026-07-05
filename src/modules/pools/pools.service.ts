@@ -1,7 +1,8 @@
 import { prisma } from '../../config/database.js';
 import { AppError } from '../../middleware/errorHandler.js';
-import type { PoolStatus, PoolLedgerType, TransactionType } from '@prisma/client';
-import { invalidateBalance } from '../../shared/cache/balance.js';
+import type { PoolLedgerType, PoolStatus } from '@prisma/client';
+import { creditTokens, debitTokens } from '../tokens/tokens.service.js';
+import { getRangeData } from '../screentime/screentime.service.js';
 
 // ---------------------------------------------------------------------------
 // Create pool
@@ -15,19 +16,6 @@ export async function createPool(
   maxParticipants: number | undefined,
   endsAt: Date,
 ) {
-  // Look up wallet OUTSIDE the transaction to get the ID, then use the ID inside.
-  // This avoids the Prisma interactive transaction visibility issue where
-  // findFirst/findUnique can't see records created on a different connection.
-  const wallet = await prisma.tokenWallet.findFirst({
-    where: { userId: creatorId },
-  });
-  if (!wallet) {
-    throw new AppError('Token wallet not found', 404);
-  }
-  if (wallet.balance < entryFee) {
-    throw new AppError('Insufficient token balance to create pool', 400);
-  }
-
   const created = await prisma.$transaction(async (tx) => {
     const pool = await tx.pool.create({
       data: {
@@ -59,22 +47,14 @@ export async function createPool(
       },
     });
 
-    // Deduct entry fee inside the same transaction using the wallet ID we already have
-    const newBalance = wallet.balance - entryFee;
-    await tx.tokenWallet.update({
-      where: { id: wallet.id },
-      data: { balance: newBalance },
-    });
-    await tx.tokenTransaction.create({
-      data: {
-        walletId: wallet.id,
-        amount: -entryFee,
-        type: 'POOL_ENTRY' as TransactionType,
-        description: `Joined pool "${name}"`,
-        referenceId: pool.id,
-        balanceAfter: newBalance,
-      },
-    });
+    // Atomic, race-safe debit that participates in this same transaction via
+    // `tx` — pool creation and the entry-fee charge commit or roll back
+    // together, and the underlying wallet write is guarded against
+    // concurrent overdraft (see tokens.service.ts). This replaces the old
+    // pattern of reading the wallet balance outside the transaction and
+    // writing back a computed absolute value, which was a lost-update race
+    // (CODE_REVIEW.md #1).
+    await debitTokens(creatorId, entryFee, 'POOL_ENTRY', `Joined pool "${name}"`, pool.id, tx);
 
     await tx.pool.update({
       where: { id: pool.id },
@@ -84,7 +64,6 @@ export async function createPool(
     return pool;
   });
 
-  invalidateBalance(creatorId);
   return getPool(created.id);
 }
 
@@ -93,53 +72,38 @@ export async function createPool(
 // ---------------------------------------------------------------------------
 
 export async function joinPool(poolId: string, userId: string) {
-  // Look up wallet and pool OUTSIDE the transaction to get IDs
-  const wallet = await prisma.tokenWallet.findFirst({ where: { userId } });
-  if (!wallet) {
-    throw new AppError('Token wallet not found', 404);
-  }
-
-  const pool = await prisma.pool.findUnique({
-    where: { id: poolId },
-    include: { participants: true },
-  });
-
-  if (!pool) {
-    throw new AppError('Pool not found', 404);
-  }
-  if (pool.status !== 'OPEN') {
-    throw new AppError('Pool is not open for joining', 400);
-  }
-  if (pool.creatorId === userId) {
-    throw new AppError('Creator is already a participant', 400);
-  }
-  if (pool.participants.some((p) => p.userId === userId)) {
-    throw new AppError('You are already a participant in this pool', 400);
-  }
-  if (pool.maxParticipants !== null && pool.participants.length >= pool.maxParticipants) {
-    throw new AppError('Pool is full', 400);
-  }
-  if (wallet.balance < pool.entryFee) {
-    throw new AppError('Insufficient token balance to join pool', 400);
-  }
-
   await prisma.$transaction(async (tx) => {
-    // Deduct entry fee
-    const newBalance = wallet.balance - pool.entryFee;
-    await tx.tokenWallet.update({
-      where: { id: wallet.id },
-      data: { balance: newBalance },
+    // Row-lock the pool for the duration of this transaction so concurrent
+    // joins (or a join racing a settle) against the same pool serialize
+    // instead of both reading a stale participant count / potTotal and
+    // overshooting maxParticipants (CODE_REVIEW.md #13).
+    await tx.$executeRaw`SELECT id FROM "Pool" WHERE id = ${poolId} FOR UPDATE`;
+
+    const pool = await tx.pool.findUnique({
+      where: { id: poolId },
+      include: { participants: true },
     });
-    await tx.tokenTransaction.create({
-      data: {
-        walletId: wallet.id,
-        amount: -pool.entryFee,
-        type: 'POOL_ENTRY' as TransactionType,
-        description: `Joined pool`,
-        referenceId: poolId,
-        balanceAfter: newBalance,
-      },
-    });
+
+    if (!pool) {
+      throw new AppError('Pool not found', 404);
+    }
+    if (pool.status !== 'OPEN') {
+      throw new AppError('Pool is not open for joining', 400);
+    }
+    if (pool.endsAt <= new Date()) {
+      throw new AppError('Pool has already ended', 400);
+    }
+    if (pool.creatorId === userId) {
+      throw new AppError('Creator is already a participant', 400);
+    }
+    if (pool.participants.some((p) => p.userId === userId)) {
+      throw new AppError('You are already a participant in this pool', 400);
+    }
+    if (pool.maxParticipants !== null && pool.participants.length >= pool.maxParticipants) {
+      throw new AppError('Pool is full', 400);
+    }
+
+    await debitTokens(userId, pool.entryFee, 'POOL_ENTRY', 'Joined pool', poolId, tx);
 
     await tx.poolParticipant.create({
       data: { poolId, userId, entryFeePaid: pool.entryFee },
@@ -160,7 +124,6 @@ export async function joinPool(poolId: string, userId: string) {
     });
   });
 
-  invalidateBalance(userId);
   return getPool(poolId);
 }
 
@@ -169,28 +132,28 @@ export async function joinPool(poolId: string, userId: string) {
 // ---------------------------------------------------------------------------
 
 export async function leavePool(poolId: string, userId: string) {
-  // Look up pool and wallet OUTSIDE the transaction
-  const existing = await prisma.pool.findUnique({
-    where: { id: poolId },
-    include: { participants: true },
-  });
-  if (!existing) {
-    throw new AppError('Pool not found', 404);
-  }
-  if (existing.status !== 'OPEN') {
-    throw new AppError('Cannot leave a pool that is not open', 400);
-  }
-  const participant = existing.participants.find((p) => p.userId === userId);
-  if (!participant) {
-    throw new AppError('You are not a participant in this pool', 400);
-  }
-  if (existing.creatorId === userId) {
-    throw new AppError('Creator cannot leave the pool', 400);
-  }
-
-  const wallet = await prisma.tokenWallet.findFirst({ where: { userId } });
-
   await prisma.$transaction(async (tx) => {
+    // Same row-lock rationale as joinPool.
+    await tx.$executeRaw`SELECT id FROM "Pool" WHERE id = ${poolId} FOR UPDATE`;
+
+    const existing = await tx.pool.findUnique({
+      where: { id: poolId },
+      include: { participants: true },
+    });
+    if (!existing) {
+      throw new AppError('Pool not found', 404);
+    }
+    if (existing.status !== 'OPEN') {
+      throw new AppError('Cannot leave a pool that is not open', 400);
+    }
+    const participant = existing.participants.find((p) => p.userId === userId && !p.leftAt);
+    if (!participant) {
+      throw new AppError('You are not a participant in this pool', 400);
+    }
+    if (existing.creatorId === userId) {
+      throw new AppError('Creator cannot leave the pool', 400);
+    }
+
     await tx.poolParticipant.update({
       where: { id: participant.id },
       data: { leftAt: new Date() },
@@ -210,27 +173,9 @@ export async function leavePool(poolId: string, userId: string) {
       data: { potTotal: existing.potTotal - participant.entryFeePaid },
     });
 
-    // Refund entry fee inside the same transaction
-    if (wallet) {
-      const newBalance = wallet.balance + participant.entryFeePaid;
-      await tx.tokenWallet.update({
-        where: { id: wallet.id },
-        data: { balance: newBalance },
-      });
-      await tx.tokenTransaction.create({
-        data: {
-          walletId: wallet.id,
-          amount: participant.entryFeePaid,
-          type: 'POOL_REFUND' as TransactionType,
-          description: `Left pool (refund)`,
-          referenceId: poolId,
-          balanceAfter: newBalance,
-        },
-      });
-    }
+    await creditTokens(userId, participant.entryFeePaid, 'POOL_REFUND', 'Left pool (refund)', poolId, tx);
   });
 
-  invalidateBalance(userId);
   return getPool(poolId);
 }
 
@@ -288,6 +233,7 @@ export async function getPool(poolId: string) {
       tokensWon: p.tokensWon,
       focusScore: p.focusScore,
       joinedAt: p.joinedAt,
+      leftAt: p.leftAt,
     })),
     startedAt: pool.startedAt,
     endsAt: pool.endsAt,
@@ -351,11 +297,68 @@ export async function listPools(
 // Settle pool
 // ---------------------------------------------------------------------------
 
-export async function settlePool(
-  poolId: string,
-  winnerUserId: string,
-) {
-  // Look up pool and winner wallet OUTSIDE the transaction to get IDs
+/**
+ * Fraction of the pot taken as a platform fee on settlement.
+ */
+const PLATFORM_FEE_RATE = 0.1;
+
+interface ParticipantScore {
+  participantId: string;
+  userId: string;
+  entryFeePaid: number;
+  avgHealth: number;
+}
+
+/**
+ * Computes each active participant's real focus/brain-health score across
+ * the pool's active window, instead of trusting a client-supplied winner.
+ *
+ * Previously `settlePool` accepted an arbitrary `winnerUserId` from the
+ * request body and paid that participant out with zero verification — any
+ * pool creator could declare themselves (or a friend) the winner and
+ * collect the pot. See CODE_REVIEW.md #2.
+ */
+async function scoreParticipants(
+  poolCreatedAt: Date,
+  poolEndsAt: Date,
+  participants: { id: string; userId: string; entryFeePaid: number; joinedAt: Date; leftAt: Date | null }[],
+): Promise<ParticipantScore[]> {
+  const active = participants.filter((p) => !p.leftAt);
+
+  return Promise.all(
+    active.map(async (p) => {
+      const windowStart = poolCreatedAt > p.joinedAt ? poolCreatedAt : p.joinedAt;
+      const summaries = await getRangeData(p.userId, windowStart, poolEndsAt);
+      const avgHealth =
+        summaries.length > 0
+          ? summaries.reduce((sum, s) => sum + s.brainHealth, 0) / summaries.length
+          : 0;
+
+      return {
+        participantId: p.id,
+        userId: p.userId,
+        entryFeePaid: p.entryFeePaid,
+        avgHealth,
+      };
+    }),
+  );
+}
+
+/**
+ * Settles a pool once its deadline has passed. The winner (or winners, in
+ * the event of a tie) is derived entirely from each participant's real
+ * screen-time/focus data over the pool's active window — the caller cannot
+ * pick who gets paid. If nobody has any qualifying activity data, every
+ * participant is refunded in full rather than an arbitrary payout being
+ * made.
+ *
+ * Double-settlement is prevented by an atomic conditional `UPDATE` that
+ * flips the pool's status away from OPEN/ACTIVE: Postgres takes a row lock
+ * for the duration of that UPDATE, so a second concurrent settle call
+ * blocks until the first commits, then observes `count === 0` and fails
+ * cleanly instead of paying out twice (CODE_REVIEW.md #2).
+ */
+export async function settlePool(poolId: string) {
   const existing = await prisma.pool.findUnique({
     where: { id: poolId },
     include: { participants: true },
@@ -366,86 +369,105 @@ export async function settlePool(
   if (existing.endsAt >= new Date()) {
     throw new AppError('Pool has not ended yet', 400);
   }
-  if (
-    existing.status !== ('OPEN' as PoolStatus) &&
-    existing.status !== ('ACTIVE' as PoolStatus)
-  ) {
-    throw new AppError(
-      'Pool can only be settled from OPEN or ACTIVE status',
-      400,
-    );
-  }
-  const winner = existing.participants.find((p) => p.userId === winnerUserId);
-  if (!winner) {
-    throw new AppError('Winner must be a participant in the pool', 400);
+  if (existing.status !== ('OPEN' as PoolStatus) && existing.status !== ('ACTIVE' as PoolStatus)) {
+    throw new AppError('Pool can only be settled from OPEN or ACTIVE status', 400);
   }
 
-  const winnerWallet = await prisma.tokenWallet.findFirst({
-    where: { userId: winnerUserId },
-  });
-  if (!winnerWallet) {
-    throw new AppError('Winner token wallet not found', 404);
+  const activeParticipants = existing.participants.filter((p) => !p.leftAt);
+  if (activeParticipants.length === 0) {
+    throw new AppError('Pool has no remaining participants to settle', 400);
   }
 
-  // Everything else — pool state update + wallet credit — in a single transaction
+  // Data-derived scoring happens before we take the settlement lock so the
+  // (potentially slower) screen-time aggregation doesn't hold a row lock.
+  const scores = await scoreParticipants(existing.createdAt, existing.endsAt, existing.participants);
+  const bestScore = Math.max(...scores.map((s) => s.avgHealth));
+  const winners = bestScore > 0 ? scores.filter((s) => s.avgHealth === bestScore) : [];
+
   await prisma.$transaction(async (tx) => {
-    // Calculate placeholder focus scores
-    for (const p of existing.participants) {
+    const guard = await tx.pool.updateMany({
+      where: { id: poolId, status: { in: ['OPEN', 'ACTIVE'] } },
+      data: { status: 'SETTLED' as PoolStatus, settledAt: new Date() },
+    });
+    if (guard.count === 0) {
+      throw new AppError('Pool has already been settled', 409);
+    }
+
+    // Re-read the pot total now that we hold the settlement lock, so any
+    // join/leave that raced us in but lost is correctly reflected.
+    const locked = await tx.pool.findUniqueOrThrow({ where: { id: poolId } });
+
+    // Persist real, data-derived focus scores for every active participant.
+    for (const s of scores) {
       await tx.poolParticipant.update({
-        where: { id: p.id },
-        data: { focusScore: Math.random() * 100 },
+        where: { id: s.participantId },
+        data: { focusScore: s.avgHealth },
       });
     }
 
-    const platformFee = Math.floor(existing.potTotal * 0.1);
-    const winnerPayout = existing.potTotal - platformFee;
-
-    await tx.pool.update({
-      where: { id: poolId },
-      data: { status: 'SETTLED' as PoolStatus, settledAt: new Date() },
-    });
-
-    await tx.poolParticipant.update({
-      where: { id: winner.id },
-      data: { tokensWon: winnerPayout },
-    });
-
-    await tx.poolLedger.createMany({
-      data: [
-        {
+    if (winners.length === 0) {
+      // Nobody had any qualifying activity data during the pool window —
+      // there's no fair basis to declare a winner, so refund everyone.
+      for (const p of activeParticipants) {
+        await tx.poolLedger.create({
+          data: {
+            poolId,
+            type: 'REFUND' as PoolLedgerType,
+            amount: p.entryFeePaid,
+            description: `No verifiable activity data — refunding ${p.userId}`,
+          },
+        });
+        await creditTokens(
+          p.userId,
+          p.entryFeePaid,
+          'POOL_REFUND',
+          `Pool "${existing.name}" cancelled: no activity data to determine a winner`,
           poolId,
-          type: 'PLATFORM_FEE' as PoolLedgerType,
-          amount: platformFee,
-          description: `Platform fee (10%)`,
-        },
-        {
-          poolId,
-          type: 'WINNING_PAYOUT' as PoolLedgerType,
-          amount: winnerPayout,
-          description: `Winner payout to ${winnerUserId}`,
-        },
-      ],
-    });
+          tx,
+        );
+      }
+      return;
+    }
 
-    // Credit winner's wallet INSIDE the same transaction
-    const newBalance = winnerWallet.balance + winnerPayout;
-    await tx.tokenWallet.update({
-      where: { id: winnerWallet.id },
-      data: { balance: newBalance },
-    });
-    await tx.tokenTransaction.create({
+    const platformFee = Math.floor(locked.potTotal * PLATFORM_FEE_RATE);
+    const payoutPool = locked.potTotal - platformFee;
+    const share = Math.floor(payoutPool / winners.length);
+
+    await tx.poolLedger.create({
       data: {
-        walletId: winnerWallet.id,
-        amount: winnerPayout,
-        type: 'POOL_WIN' as TransactionType,
-        description: `Won pool`,
-        referenceId: poolId,
-        balanceAfter: newBalance,
+        poolId,
+        type: 'PLATFORM_FEE' as PoolLedgerType,
+        amount: platformFee,
+        description: `Platform fee (${Math.round(PLATFORM_FEE_RATE * 100)}%)`,
       },
     });
+
+    for (const winner of winners) {
+      await tx.poolParticipant.update({
+        where: { id: winner.participantId },
+        data: { tokensWon: share },
+      });
+
+      await tx.poolLedger.create({
+        data: {
+          poolId,
+          type: 'WINNING_PAYOUT' as PoolLedgerType,
+          amount: share,
+          description: `Winner payout to ${winner.userId} (focus score ${winner.avgHealth.toFixed(1)})`,
+        },
+      });
+
+      await creditTokens(
+        winner.userId,
+        share,
+        'POOL_WIN',
+        `Won pool "${existing.name}" (focus score ${winner.avgHealth.toFixed(1)})`,
+        poolId,
+        tx,
+      );
+    }
   });
 
-  invalidateBalance(winnerUserId);
   return getPool(poolId);
 }
 

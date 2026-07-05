@@ -4,7 +4,7 @@ import { calculateTier, calculateHealth } from '../../shared/brain-engine.js';
 import { logger } from '../../config/logger.js';
 import { enqueue } from '../../shared/queue/boss.js';
 import { JOBS } from '../../shared/queue/jobs.js';
-import { getUtcDayBoundary, resolveTimezone } from '../../shared/tz.js';
+import { getUtcDayBoundary, resolveTimezone, localDayKey } from '../../shared/tz.js';
 import { appEvents } from '../../shared/events.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -94,19 +94,22 @@ function buildCategoryBreakdown(
   return breakdown.sort((a, b) => b.seconds - a.seconds);
 }
 
-function getStartOfDay(date: Date): Date {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function getEndOfDay(date: Date): Date {
-  const d = new Date(date);
-  d.setHours(23, 59, 59, 999);
-  return d;
-}
-
 // ─── Service Functions ───────────────────────────────────────────────────────
+
+/**
+ * Returns today's UTC-expressed day boundary in the user's own timezone.
+ * Used as the default `from`/`to` for range endpoints when the caller
+ * doesn't supply one. Centralizing this here means every "default to today"
+ * call site is timezone-aware and consistent with getTodaySummary — the
+ * controller used to fall back to `new Date().setHours(0,0,0,0)`, which
+ * depends on the server process's local timezone (typically UTC in
+ * production, but not guaranteed) rather than the user's.
+ */
+export async function getDefaultTodayRange(userId: string): Promise<{ from: Date; to: Date }> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { timezone: true } });
+  const { dayStart, dayEnd } = getUtcDayBoundary(resolveTimezone(user?.timezone), new Date());
+  return { from: dayStart, to: dayEnd };
+}
 
 export async function uploadBatch(
   userId: string,
@@ -234,6 +237,19 @@ export async function getRangeData(
   from: Date,
   to: Date
 ): Promise<DailySummary[]> {
+  // Resolve the user's timezone so entries are bucketed by their LOCAL
+  // calendar day, matching getTodaySummary/updateBrainState/
+  // recalculateBrainState. This function is also the one
+  // `evaluateContract` (commitment-contract resolution, real token stakes)
+  // calls to compute "days hit" — grouping by a raw UTC day instead could
+  // attribute a late-evening focus session to the wrong day for any
+  // non-UTC user and flip a contract's outcome (CODE_REVIEW.md #17).
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { timezone: true },
+  });
+  const tz = resolveTimezone(user?.timezone);
+
   const entries = await prisma.screenTimeEntry.findMany({
     where: {
       userId,
@@ -242,10 +258,10 @@ export async function getRangeData(
     orderBy: { startedAt: 'asc' },
   });
 
-  // Group entries by day
+  // Group entries by the user's local day.
   const dayMap = new Map<string, typeof entries>();
   for (const entry of entries) {
-    const dayKey = entry.startedAt.toISOString().slice(0, 10);
+    const dayKey = localDayKey(entry.startedAt, tz);
     const existing = dayMap.get(dayKey);
     if (existing) {
       existing.push(entry);

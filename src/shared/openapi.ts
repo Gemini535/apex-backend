@@ -800,9 +800,18 @@ export const openapiSpec = {
       post: {
         tags: ['Pools'],
         summary: 'Settle a pool (distribute winnings)',
-        description: 'Only the pool creator can settle, and only after the pool ends.',
+        description:
+          "Only the pool creator or a participant can trigger settlement, and only after the pool " +
+          "ends. The winner is derived entirely from each participant's real screen-time/focus data " +
+          "over the pool's active window — this endpoint takes no body and does not accept a " +
+          "client-supplied winner. Ties split the payout evenly; if no participant has any " +
+          "verifiable activity data, every entry fee is refunded in full instead of an arbitrary payout.",
         parameters: [{ name: 'poolId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: { '200': { description: 'Pool settled' }, '403': { description: 'Not the creator' } },
+        responses: {
+          '200': { description: 'Pool settled' },
+          '403': { description: 'Not the creator or a participant' },
+          '409': { description: 'Pool has already been settled' },
+        },
       },
     },
     '/api/pools/{poolId}/ledger': {

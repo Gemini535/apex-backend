@@ -3,27 +3,16 @@ import { AppError } from '../../middleware/errorHandler.js';
 import { debitTokens } from '../tokens/tokens.service.js';
 
 // ─── Deadline Evaluation ───────────────────────────────────────────────────────
-
-/**
- * Transitions any ACTIVE commitment contracts whose deadline has passed to
- * FORFEITED. Called by the queue job `handleContractResolveAll`, but exposed
- * separately so it can also be triggered inline (e.g., in a manual
- * administration endpoint).
- */
-export async function evaluateDeadlines(userId?: string): Promise<number> {
-  const now = new Date();
-
-  const result = await prisma.commitmentContract.updateMany({
-    where: {
-      status: 'ACTIVE',
-      endDate: { lte: now },
-      ...(userId ? { userId } : {}),
-    },
-    data: { status: 'FORFEITED' },
-  });
-
-  return result.count;
-}
+//
+// NOTE: There used to be an `evaluateDeadlines` helper here that blindly
+// force-forfeited every overdue ACTIVE contract with no screen-time
+// evaluation at all, with a docstring falsely claiming it was "called by the
+// queue job handleContractResolveAll". It was never actually wired into
+// anything (grep confirmed zero callers) — the real, data-driven resolution
+// logic lives in `src/shared/queue/evaluate-contract.ts`'s `evaluateContract`,
+// which IS what the queue job calls. That dead function has been removed so
+// nobody accidentally reconnects it and silently forfeits contracts users
+// actually won (see CODE_REVIEW.md #23).
 
 // ─── Commitment Contracts ─────────────────────────────────────────────────────
 
@@ -46,35 +35,14 @@ export async function createContract(
     throw new AppError('End date must be after start date', 400);
   }
 
-  // Debit the pledge up front. The debit is the "stake" — if the contract
-  // completes we credit it back; if it's forfeited the debit stands.
+  // Create the contract row first, then debit the pledge referencing its id
+  // directly — no more create-with-null-reference-then-backfill dance. The
+  // debit is the "stake": if the contract completes we credit it back; if
+  // it's forfeited the debit stands. Both writes share this transaction via
+  // `tx`, and the debit itself is atomic/race-safe (see tokens.service.ts),
+  // so a concurrent request against the same wallet can't cause a lost
+  // update or let the pledge go through without sufficient balance.
   return prisma.$transaction(async (tx) => {
-    const wallet = await tx.tokenWallet.findUnique({ where: { userId } });
-    if (!wallet) {
-      throw new AppError('Token wallet not found', 404);
-    }
-    if (wallet.balance < data.pledgeAmountCents) {
-      throw new AppError('Insufficient token balance for pledge', 400);
-    }
-
-    const newBalance = wallet.balance - data.pledgeAmountCents;
-
-    await tx.tokenWallet.update({
-      where: { id: wallet.id },
-      data: { balance: newBalance },
-    });
-
-    await tx.tokenTransaction.create({
-      data: {
-        walletId: wallet.id,
-        amount: -data.pledgeAmountCents,
-        type: 'CONTRACT_STAKE',
-        description: `Stake for commitment: ${data.name}`,
-        balanceAfter: newBalance,
-        referenceId: null, // contract id not known yet; back-filled below
-      },
-    });
-
     const contract = await tx.commitmentContract.create({
       data: {
         userId,
@@ -89,15 +57,14 @@ export async function createContract(
       },
     });
 
-    // Back-fill the stake transaction with the contract id for auditability.
-    await tx.tokenTransaction.updateMany({
-      where: {
-        walletId: wallet.id,
-        type: 'CONTRACT_STAKE',
-        referenceId: null,
-      },
-      data: { referenceId: contract.id },
-    });
+    await debitTokens(
+      userId,
+      data.pledgeAmountCents,
+      'CONTRACT_STAKE',
+      `Stake for commitment: ${data.name}`,
+      contract.id,
+      tx,
+    );
 
     return contract;
   });

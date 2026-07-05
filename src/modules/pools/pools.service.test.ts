@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { prisma } from '../../config/database.js';
 import { createPool, joinPool, leavePool, settlePool, getPoolLedger } from './pools.service.js';
+import { uploadBatch } from '../screentime/screentime.service.js';
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('pools.service', () => {
   let creatorId: string;
@@ -202,7 +205,13 @@ describe('pools.service', () => {
   });
 
   describe('settlePool', () => {
-    it('settles a pool and credits the winner', async () => {
+    // settlePool no longer accepts a client-supplied `winnerUserId` — the
+    // winner (or winners, on a tie) is derived entirely from each
+    // participant's real screen-time/focus data over the pool's active
+    // window. Previously the caller (the pool creator) could name literally
+    // anyone as the winner with zero verification (CODE_REVIEW.md #2).
+
+    it('pays out to the participant with the higher focus score, derived from real activity data', async () => {
       const winner = await prisma.user.create({
         data: {
           email: `winner-${Date.now()}@test.app`,
@@ -212,13 +221,35 @@ describe('pools.service', () => {
       });
       await prisma.tokenWallet.create({ data: { userId: winner.id, balance: 1000 } });
 
-      const endsAt = new Date(Date.now() - 1000); // already ended
+      // endsAt must be in the real future at creation time so the scoring
+      // window (participant.joinedAt .. pool.endsAt) is non-empty; we then
+      // wait for it to pass before settling. The 2s window gives the
+      // create/join/upload round-trips above plenty of headroom to land
+      // inside it.
+      const endsAt = new Date(Date.now() + 2000);
       const pool = await createPool(creatorId, 'Settle Test', undefined, 100, 10, endsAt);
       await joinPool(pool.id, winner.id);
 
-      const settled = await settlePool(pool.id, winner.id);
+      // Give the winner two hours of PRODUCTIVITY (a focus category) —
+      // enough to score 100 health for that day. The creator gets no
+      // activity data at all (health 0), so the winner should win outright.
+      await uploadBatch(winner.id, [
+        {
+          appName: 'Focus App',
+          category: 'PRODUCTIVITY',
+          duration: 2 * 60 * 60,
+          startedAt: new Date(),
+        },
+      ]);
+
+      await sleep(2500); // let endsAt pass
+
+      const settled = await settlePool(pool.id);
       expect(settled.status).toBe('SETTLED');
       expect(settled.settledAt).toBeDefined();
+
+      const winnerParticipant = settled.participants.find((p) => p.userId === winner.id);
+      expect(winnerParticipant!.focusScore).toBeGreaterThan(0);
 
       // Winner should receive potTotal - 10% platform fee via transaction record
       const winTx = await prisma.tokenTransaction.findFirst({
@@ -227,53 +258,62 @@ describe('pools.service', () => {
       });
       expect(winTx).toBeDefined();
       expect(winTx!.amount).toBe(180); // 200 - 10% = 180
+
+      const ledger = await getPoolLedger(pool.id);
+      const feeEntry = ledger.ledger.find((e) => e.type === 'PLATFORM_FEE');
+      const payoutEntry = ledger.ledger.find((e) => e.type === 'WINNING_PAYOUT');
+      expect(feeEntry?.amount).toBe(20); // 10% of 200
+      expect(payoutEntry?.amount).toBe(180);
+    });
+
+    it('refunds every participant in full when nobody has any verifiable activity data', async () => {
+      const other = await prisma.user.create({
+        data: {
+          email: `no-data-${Date.now()}@test.app`,
+          username: `no-data-${Date.now()}`,
+          passwordHash: 'fake',
+        },
+      });
+      await prisma.tokenWallet.create({ data: { userId: other.id, balance: 1000 } });
+
+      const endsAt = new Date(Date.now() + 2000);
+      const pool = await createPool(creatorId, 'No Data Pool', undefined, 30, 10, endsAt);
+      await joinPool(pool.id, other.id);
+
+      await sleep(2500);
+
+      const settled = await settlePool(pool.id);
+      expect(settled.status).toBe('SETTLED');
+      expect(settled.participants.every((p) => p.tokensWon === 0)).toBe(true);
+
+      const ledger = await getPoolLedger(pool.id);
+      expect(ledger.ledger.some((e) => e.type === 'PLATFORM_FEE')).toBe(false);
+      expect(ledger.ledger.filter((e) => e.type === 'REFUND').length).toBeGreaterThanOrEqual(2);
+
+      const refundTx = await prisma.tokenTransaction.findFirst({
+        where: { wallet: { userId: other.id }, type: 'POOL_REFUND', referenceId: pool.id },
+      });
+      expect(refundTx).toBeDefined();
+      expect(refundTx!.amount).toBe(30);
+
+      await prisma.user.delete({ where: { id: other.id } }).catch(() => {});
     });
 
     it('prevents settling a pool that has not ended', async () => {
       const endsAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // future
       const pool = await createPool(creatorId, 'Future Pool', undefined, 10, undefined, endsAt);
-      await expect(settlePool(pool.id, creatorId)).rejects.toThrow('Pool has not ended yet');
+      await expect(settlePool(pool.id)).rejects.toThrow('Pool has not ended yet');
     });
 
-    it('prevents settling with a non-participant winner', async () => {
-      const endsAt = new Date(Date.now() - 1000);
-      const pool = await createPool(creatorId, 'Bad Winner', undefined, 10, undefined, endsAt);
+    it('prevents settling the same pool twice', async () => {
+      const endsAt = new Date(Date.now() + 2000);
+      const pool = await createPool(creatorId, 'Double Settle Pool', undefined, 10, undefined, endsAt);
+      await sleep(2500);
 
-      const other = await prisma.user.create({
-        data: {
-          email: `other-winner-${Date.now()}@test.app`,
-          username: `other-winner-${Date.now()}`,
-          passwordHash: 'fake',
-        },
-      });
-
-      await expect(settlePool(pool.id, other.id)).rejects.toThrow('Winner must be a participant');
-      await prisma.user.delete({ where: { id: other.id } }).catch(() => {});
-    });
-
-    it('creates platform fee and payout ledger entries', async () => {
-      const ledgerWinner = await prisma.user.create({
-        data: {
-          email: `ledger-winner-${Date.now()}@test.app`,
-          username: `ledger-winner-${Date.now()}`,
-          passwordHash: 'fake',
-        },
-      });
-      await prisma.tokenWallet.create({ data: { userId: ledgerWinner.id, balance: 1000 } });
-
-      const endsAt = new Date(Date.now() - 1000);
-      const pool = await createPool(creatorId, 'Ledger Settle', undefined, 100, 10, endsAt);
-      await joinPool(pool.id, ledgerWinner.id);
-      await settlePool(pool.id, ledgerWinner.id);
-
-      const ledger = await getPoolLedger(pool.id);
-      const feeEntry = ledger.ledger.find((e) => e.type === 'PLATFORM_FEE');
-      const payoutEntry = ledger.ledger.find((e) => e.type === 'WINNING_PAYOUT');
-
-      expect(feeEntry).toBeDefined();
-      expect(feeEntry!.amount).toBe(20); // 10% of 200
-      expect(payoutEntry).toBeDefined();
-      expect(payoutEntry!.amount).toBe(180);
+      await settlePool(pool.id);
+      await expect(settlePool(pool.id)).rejects.toThrow(
+        'Pool can only be settled from OPEN or ACTIVE status',
+      );
     });
   });
 });
