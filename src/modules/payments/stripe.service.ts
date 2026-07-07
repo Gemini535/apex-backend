@@ -341,6 +341,21 @@ export async function handleWebhook(
 
   logger.info({ type: event.type, id: event.id }, 'Stripe webhook received');
 
+  // Event-level dedupe. Stripe delivers webhooks at-least-once, and a
+  // duplicate delivery of a money-moving event (charge.refunded in
+  // particular) must not run its side effects twice. `confirmDeposit` is
+  // internally idempotent, but the refund-reversal path below debits a
+  // wallet, so we short-circuit any event id we've already fully processed.
+  // (Best-effort: the marker is written after processing succeeds, so a
+  // crash mid-event still lets Stripe's retry through — which is what we
+  // want. The per-charge delta arithmetic below is the hard guarantee.)
+  const eventCacheKey = `stripe:event:${event.id}`;
+  const alreadyProcessed = await cacheGet<boolean>(eventCacheKey);
+  if (alreadyProcessed) {
+    logger.info({ id: event.id, type: event.type }, 'Duplicate Stripe event, skipping');
+    return { received: true };
+  }
+
   switch (event.type) {
     case 'payment_intent.succeeded': {
       const paymentIntent = event.data.object as Stripe.PaymentIntent;
@@ -376,16 +391,39 @@ export async function handleWebhook(
 
           if (wallet) {
             try {
-              // Reverse the credit: debit the same amount from the wallet.
+              // Reverse only the DELTA still owed for this charge, capped at
+              // the original credit. `charge.refunded` fires once per refund
+              // (partial refunds each fire it, with a cumulative
+              // `amount_refunded`), and Stripe may also redeliver the same
+              // event. The old code debited the FULL original credit on
+              // every delivery — a duplicate delivery or a partial refund
+              // clawed back more tokens than the user was ever credited.
+              const originalCredit = Math.abs(tx.amount);
+              const reversals = await prisma.tokenTransaction.aggregate({
+                where: { walletId: tx.walletId, referenceId: charge.id, type: 'SPENT' },
+                _sum: { amount: true },
+              });
+              const alreadyReversed = Math.abs(reversals._sum.amount ?? 0);
+              const targetReversal = Math.min(charge.amount_refunded, originalCredit);
+              const delta = targetReversal - alreadyReversed;
+
+              if (delta <= 0) {
+                logger.info(
+                  { chargeId: charge.id, alreadyReversed, targetReversal },
+                  'Refund already fully reversed, skipping',
+                );
+                break;
+              }
+
               await debitTokens(
                 wallet.userId,
-                Math.abs(tx.amount),
+                delta,
                 'SPENT',
                 `Refund reversal for charge ${charge.id}`,
                 charge.id,
               );
               logger.info(
-                { chargeId: charge.id, userId: wallet.userId, amount: Math.abs(tx.amount) },
+                { chargeId: charge.id, userId: wallet.userId, amount: delta },
                 'Tokens reversed for refunded charge',
               );
             } catch (err) {
@@ -419,6 +457,11 @@ export async function handleWebhook(
     default:
       logger.debug({ type: event.type }, 'Unhandled Stripe webhook event type');
   }
+
+  // Mark the event as processed only after all side effects succeeded, so a
+  // crash mid-processing leaves the marker unset and Stripe's retry can
+  // complete the work.
+  await cacheSet(eventCacheKey, true, IDEMPOTENCY_TTL_MS);
 
   return { received: true };
 }

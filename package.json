@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Apex — Hyper-gamified social-accountability digital wellbeing backend",
-  "main": "dist/server.js",
+  "main": "dist/src/server.js",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
