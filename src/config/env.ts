@@ -72,6 +72,14 @@ export const env = {
     url: getEnv('DATABASE_URL'),
   },
 
+  /**
+   * Production frontend origin. Used for CORS (app.ts) and as the base for
+   * Stripe Connect onboarding return/refresh URLs. For a native-iOS-only
+   * launch these URLs can point at a simple hosted page that tells the user
+   * to return to the app (Stripe requires https URLs here).
+   */
+  frontendUrl: getEnv('FRONTEND_URL', 'https://apex-app.com'),
+
   jwt: {
     secret: getEnv('JWT_SECRET'),
     refreshSecret: getEnv('JWT_REFRESH_SECRET'),

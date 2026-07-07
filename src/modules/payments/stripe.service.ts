@@ -466,6 +466,87 @@ export async function handleWebhook(
   return { received: true };
 }
 
+// ─── Stripe Connect onboarding ───────────────────────────────────────────────
+// Withdrawals are paid out via stripe.transfers.create to the user's connected
+// Express account. Until the user completes Connect onboarding there is no
+// stripeConnectedAccountId and createWithdrawal correctly refuses — these two
+// functions are the missing half of that flow: create the account + hand the
+// client a hosted onboarding link, and report onboarding/payout status.
+
+export interface ConnectOnboardingResult {
+  accountId: string;
+  onboardingUrl: string;
+  expiresAt: number; // unix seconds — Stripe account links expire quickly
+}
+
+export interface ConnectStatusResult {
+  onboarded: boolean;
+  payoutsEnabled: boolean;
+  detailsSubmitted: boolean;
+  accountId: string | null;
+}
+
+export async function createConnectOnboarding(userId: string): Promise<ConnectOnboardingResult> {
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { id: userId },
+    select: { email: true },
+  });
+
+  let paymentAccount = await prisma.paymentAccount.findUnique({ where: { userId } });
+  let accountId = paymentAccount?.stripeConnectedAccountId ?? null;
+
+  if (!accountId) {
+    const account = await stripe.accounts.create({
+      type: 'express',
+      email: user.email,
+      capabilities: { transfers: { requested: true } },
+      metadata: { userId },
+    });
+    accountId = account.id;
+
+    paymentAccount = await prisma.paymentAccount.upsert({
+      where: { userId },
+      create: { userId, stripeConnectedAccountId: accountId, paymentMethod: 'stripe' },
+      update: { stripeConnectedAccountId: accountId },
+    });
+  }
+
+  const link = await stripe.accountLinks.create({
+    account: accountId,
+    // Hosted pages that tell the user to return to the app. Stripe requires
+    // real https URLs here even for native-app flows.
+    refresh_url: `${env.frontendUrl}/connect/refresh`,
+    return_url: `${env.frontendUrl}/connect/return`,
+    type: 'account_onboarding',
+  });
+
+  logger.info({ userId, accountId }, 'Stripe Connect onboarding link created');
+
+  return {
+    accountId,
+    onboardingUrl: link.url,
+    expiresAt: link.expires_at,
+  };
+}
+
+export async function getConnectStatus(userId: string): Promise<ConnectStatusResult> {
+  const paymentAccount = await prisma.paymentAccount.findUnique({ where: { userId } });
+  const accountId = paymentAccount?.stripeConnectedAccountId ?? null;
+
+  if (!accountId) {
+    return { onboarded: false, payoutsEnabled: false, detailsSubmitted: false, accountId: null };
+  }
+
+  const account = await stripe.accounts.retrieve(accountId);
+
+  return {
+    onboarded: account.details_submitted === true && account.payouts_enabled === true,
+    payoutsEnabled: account.payouts_enabled === true,
+    detailsSubmitted: account.details_submitted === true,
+    accountId,
+  };
+}
+
 // ─── Get or create Stripe customer ID ────────────────────────────────────────
 
 export async function getStripeCustomerId(userId: string): Promise<string | null> {

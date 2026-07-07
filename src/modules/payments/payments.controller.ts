@@ -1,6 +1,13 @@
 import type { Request, Response, NextFunction } from 'express';
 import { AppError } from '../../middleware/errorHandler.js';
-import { createDeposit, createWithdrawal, handleWebhook, getStripeCustomerId } from './stripe.service.js';
+import {
+  createDeposit,
+  createWithdrawal,
+  handleWebhook,
+  getStripeCustomerId,
+  createConnectOnboarding,
+  getConnectStatus,
+} from './stripe.service.js';
 
 // ─── Stripe deposit ──────────────────────────────────────────────────────────
 
@@ -71,6 +78,26 @@ export async function getCustomerHandler(req: Request, res: Response, next: Next
   try {
     const customerId = await getStripeCustomerId(req.user!.userId);
     res.json({ stripeCustomerId: customerId });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Stripe Connect onboarding (required before withdrawals) ─────────────────
+
+export async function connectOnboardingHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const result = await createConnectOnboarding(req.user!.userId);
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function connectStatusHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const result = await getConnectStatus(req.user!.userId);
+    res.json(result);
   } catch (err) {
     next(err);
   }

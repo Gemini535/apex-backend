@@ -741,6 +741,20 @@ export const openapiSpec = {
         responses: { '200': { description: 'Customer details' } },
       },
     },
+    '/api/payments/connect/onboarding': {
+      post: {
+        tags: ['Tokens & Payments'],
+        summary: 'Create a Stripe Connect Express account and hosted onboarding link (required before withdrawals)',
+        responses: { '201': { description: 'Returns accountId, onboardingUrl (open in browser), expiresAt' } },
+      },
+    },
+    '/api/payments/connect/status': {
+      get: {
+        tags: ['Tokens & Payments'],
+        summary: 'Check Stripe Connect onboarding / payout status',
+        responses: { '200': { description: 'Returns onboarded, payoutsEnabled, detailsSubmitted, accountId' } },
+      },
+    },
 
     // ─── Pools ──────────────────────────────────────────────────────────────
     '/api/pools': {

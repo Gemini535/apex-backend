@@ -52,7 +52,8 @@ Optional (features degrade gracefully): Twilio (SMS 2FA), SMTP (email), Apple/Go
 - ⬜ Register webhook endpoint: `https://<railway-domain>/api/payments/webhook`
   - Events: `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`
 - ⬜ Copy the endpoint's `whsec_...` into `STRIPE_WEBHOOK_SECRET`
-- ⬜ Stripe Connect must be enabled on the account (withdrawals use `stripe.transfers.create` to connected accounts); confirm the onboarding flow that populates `stripeConnectedAccountId` exists in the client, or disable withdrawals at launch
+- ⬜ Stripe Connect must be enabled on the account (Express accounts): withdrawals use `stripe.transfers.create` to connected accounts. Onboarding endpoints now exist — `POST /api/payments/connect/onboarding` returns a hosted onboarding URL the client opens in a browser; `GET /api/payments/connect/status` reports payout readiness. The iOS client must call these before offering withdrawal.
+- ⬜ Host simple `/connect/return` and `/connect/refresh` pages at `FRONTEND_URL` (Stripe redirects there after onboarding; they can just say "return to the Apex app")
 - ⬜ Test end-to-end with Stripe CLI before go-live: `stripe trigger payment_intent.succeeded`
 
 ## 5. Post-deploy verification — ⬜
