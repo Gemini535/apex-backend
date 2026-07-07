@@ -1,0 +1,68 @@
+name: CI
+
+# There was no CI at all in this repo before this — every fix in the
+# "Security & correctness hardening pass" commit landed with a real Vitest
+# suite behind it, but nothing actually ran that suite on push/PR. This
+# pipeline runs typecheck, build, and the full test suite (including the
+# pool/wallet/settlement tests that exercise the money-handling code) against
+# a real Postgres service container on every push and pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: apex
+          POSTGRES_PASSWORD: apex
+          POSTGRES_DB: apex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apex"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://apex:apex@localhost:5432/apex_test?schema=public
+      # Not real secrets — CI-only values that satisfy env.ts's length/
+      # placeholder validation (see src/config/env.ts). Two distinct values,
+      # neither on the BLOCKED_SECRETS list, both well over the 24-char floor.
+      JWT_SECRET: ci-test-jwt-secret-do-not-use-in-prod-0001
+      JWT_REFRESH_SECRET: ci-test-refresh-secret-do-not-use-in-prod-0002
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
