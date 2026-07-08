@@ -158,6 +158,24 @@ export async function creditTokens(
   return result;
 }
 
+/**
+ * Explicit tx-scoped variant of `creditTokens`, for call sites (e.g.
+ * `evaluateContract`) where naming the transaction client as the first
+ * argument reads more clearly than a trailing optional parameter. Delegates
+ * to `creditTokens` so there's exactly one implementation of the atomic
+ * credit logic (the raw-SQL `UPDATE ... RETURNING` above).
+ */
+export async function creditTokensTx(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  amount: number,
+  type: TransactionType,
+  description?: string,
+  referenceId?: string,
+): Promise<{ balance: number }> {
+  return creditTokens(userId, amount, type, description, referenceId, tx);
+}
+
 // ---------------------------------------------------------------------------
 // Debit tokens (atomic)
 // ---------------------------------------------------------------------------

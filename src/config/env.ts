@@ -84,6 +84,8 @@ export const env = {
     teamId: getEnv('APPLE_TEAM_ID', ''),
     keyId: getEnv('APPLE_KEY_ID', ''),
     privateKeyPath: getEnv('APPLE_PRIVATE_KEY_PATH', ''),
+    appAttestBundleId: getEnv('APPLE_APP_ATTEST_BUNDLE_ID', ''),
+    appAttestEnvironment: getEnv('APPLE_APP_ATTEST_ENV', 'development') as 'development' | 'production',
   },
 
   google: {
@@ -145,7 +147,35 @@ export const env = {
     getEnv('TRUST_PROXY_HOPS', getEnv('NODE_ENV', 'development') === 'production' ? '1' : '0'),
     10,
   ),
+
+  features: {
+    paymentsEnabled: getEnv('POOLS_PAYMENTS_ENABLED', 'true') === 'true',
+    attestationEnforcement: getEnv('ATTESTATION_ENFORCEMENT', 'off') as 'off' | 'flag' | 'strict',
+  },
+
+  attestation: {
+    challengeTtlMs: parseInt(getEnv('ATTESTATION_CHALLENGE_TTL_MS', '300000'), 10),
+  },
+
+  pools: {
+    joinGraceMs: parseInt(getEnv('POOL_JOIN_GRACE_MS', '1800000'), 10), // 30 min default
+  },
 } as const;
+
+/**
+ * Attestation config is only required once enforcement is actually turned
+ * on — 'off' (the default) must work with no Apple App Attest config at all.
+ */
+function validateAttestationConfig(): void {
+  if (env.features.attestationEnforcement !== 'off') {
+    if (!env.apple.teamId || !env.apple.appAttestBundleId) {
+      throw new Error(
+        'APPLE_TEAM_ID and APPLE_APP_ATTEST_BUNDLE_ID must be set when ATTESTATION_ENFORCEMENT is "flag" or "strict"'
+      );
+    }
+  }
+}
 
 // Validate secrets at module load time (fails fast on startup)
 validateSecrets();
+validateAttestationConfig();

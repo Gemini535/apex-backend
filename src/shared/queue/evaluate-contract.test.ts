@@ -167,6 +167,14 @@ describe('evaluate-contract', () => {
     const row = await prisma.commitmentContract.findUnique({ where: { id: contract.id } });
     expect(row!.status).toBe('COMPLETED');
     expect(row!.completedAt).not.toBeNull();
+
+    // Regression: creditTokensTx writes exactly one CONTRACT_PAYOUT ledger
+    // row per payout — the old code wrote a second, duplicate row via a
+    // separate EARNED-type creditTokens() call plus a manual insert.
+    const payoutRows = await prisma.tokenTransaction.count({
+      where: { referenceId: contract.id, type: 'CONTRACT_PAYOUT' },
+    });
+    expect(payoutRows).toBe(1);
   });
 
   it('is idempotent — second call returns null', async () => {

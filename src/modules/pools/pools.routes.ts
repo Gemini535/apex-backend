@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authenticateToken } from '../../middleware/auth.js';
 import { validate } from '../../middleware/validate.js';
-import { createPool, joinPool } from './pools.validation.js';
+import { createPool, joinPool, settlePool } from './pools.validation.js';
 import {
   createPoolHandler,
   joinPoolHandler,
@@ -19,7 +19,7 @@ router.post('/:poolId/join', authenticateToken, validate(joinPool), joinPoolHand
 router.post('/:poolId/leave', authenticateToken, leavePoolHandler);
 router.get('/:poolId', authenticateToken, getPoolHandler);
 router.get('/', authenticateToken, listPoolsHandler);
-router.post('/:poolId/settle', authenticateToken, settlePoolHandler);
+router.post('/:poolId/settle', authenticateToken, validate(settlePool), settlePoolHandler);
 router.get('/:poolId/ledger', authenticateToken, getPoolLedgerHandler);
 
 export default router;

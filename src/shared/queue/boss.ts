@@ -71,7 +71,10 @@ export async function startBoss(): Promise<PgBoss> {
 
     // ─── Cron schedules ──────────────────────────────────────────────────
     // Hourly sweep: evaluate and resolve overdue commitment contracts.
-    if (env.nodeEnv !== 'test') {
+    // Also gated by the money-surface flag — stop the sweep from running
+    // (and staking/forfeiting tokens) while pools/payments/commitments are
+    // disabled.
+    if (env.nodeEnv !== 'test' && env.features.paymentsEnabled) {
       await instance.schedule(JOBS.CONTRACT_RESOLVE_ALL, '0 * * * *');
     }
 

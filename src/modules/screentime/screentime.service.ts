@@ -1,11 +1,15 @@
 import { prisma } from '../../config/database.js';
-import type { AppCategory, BrainTier } from '@prisma/client';
+import type { AppCategory, BrainTier, EntryAttestation, Prisma } from '@prisma/client';
 import { calculateTier, calculateHealth } from '../../shared/brain-engine.js';
+import { AppError } from '../../middleware/errorHandler.js';
 import { logger } from '../../config/logger.js';
 import { enqueue } from '../../shared/queue/boss.js';
 import { JOBS } from '../../shared/queue/jobs.js';
-import { getUtcDayBoundary, resolveTimezone, localDayKey } from '../../shared/tz.js';
+import { getUtcDayBoundary, resolveTimezone, localDayKey, localDayKeysInRange } from '../../shared/tz.js';
 import { appEvents } from '../../shared/events.js';
+import { getEnforcementMode, verifyUploadAssertion } from '../attestation/attestation.service.js';
+
+type QueryClient = typeof prisma | Prisma.TransactionClient;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -17,6 +21,23 @@ interface ScreenTimeEntryInput {
   startedAt: Date;
   endedAt?: Date;
   isBlacklisted?: boolean;
+}
+
+/** Attestation info for a batch upload. `payload` is the exact raw request body bytes the client signed. */
+export interface UploadBatchAttestation {
+  keyId: string;
+  assertionB64: string;
+  nonce: string;
+  payload: Buffer;
+}
+
+export interface WindowHealth {
+  healthPercent: number;
+  hasData: boolean;
+  coveredDays: number;
+  windowDays: number;
+  totalSeconds: number;
+  focusSeconds: number;
 }
 
 interface CategoryBreakdown {
@@ -113,8 +134,28 @@ export async function getDefaultTodayRange(userId: string): Promise<{ from: Date
 
 export async function uploadBatch(
   userId: string,
-  entries: Array<ScreenTimeEntryInput>
-): Promise<{ count: number }> {
+  entries: Array<ScreenTimeEntryInput>,
+  attestation?: UploadBatchAttestation
+): Promise<{ count: number; attestationStatus: EntryAttestation }> {
+  const enforcement = getEnforcementMode();
+  let attestationStatus: EntryAttestation = 'UNATTESTED';
+  let attestationVerificationId: string | null = null;
+
+  if (enforcement !== 'off') {
+    if (attestation) {
+      const outcome = await verifyUploadAssertion(userId, attestation);
+      if (outcome.status === 'VERIFIED') {
+        attestationStatus = 'VERIFIED';
+        attestationVerificationId = outcome.verificationId;
+      } else {
+        attestationStatus = 'FAILED';
+      }
+    }
+    if (enforcement === 'strict' && attestationStatus !== 'VERIFIED') {
+      throw new AppError('Valid device attestation is required to upload screen time data', 401);
+    }
+  }
+
   const data = entries.map((entry) => ({
     userId,
     appName: entry.appName,
@@ -124,9 +165,22 @@ export async function uploadBatch(
     startedAt: entry.startedAt,
     endedAt: entry.endedAt ?? null,
     isBlacklisted: entry.isBlacklisted ?? false,
+    attestationStatus,
+    attestationVerificationId,
   }));
 
-  const result = await prisma.screenTimeEntry.createMany({ data });
+  const result = data.length > 0 ? await prisma.screenTimeEntry.createMany({ data }) : { count: 0 };
+
+  if (attestationVerificationId && result.count > 0) {
+    await prisma.attestationVerification.update({
+      where: { id: attestationVerificationId },
+      data: { entryCount: { increment: result.count } },
+    });
+  }
+
+  if (result.count === 0) {
+    return { count: 0, attestationStatus };
+  }
 
   // Recalculate brain state after new data (fire and forget via queue)
   await enqueue(JOBS.BRAIN_RECALC, { userId });
@@ -169,7 +223,7 @@ export async function uploadBatch(
     logger.error({ err, userId }, 'Threshold detection failed');
   }
 
-  return { count: result.count };
+  return { count: result.count, attestationStatus };
 }
 
 export async function getTodaySummary(userId: string): Promise<TodaySummary> {
@@ -232,34 +286,19 @@ export async function getTodaySummary(userId: string): Promise<TodaySummary> {
   };
 }
 
-export async function getRangeData(
-  userId: string,
-  from: Date,
-  to: Date
-): Promise<DailySummary[]> {
-  // Resolve the user's timezone so entries are bucketed by their LOCAL
-  // calendar day, matching getTodaySummary/updateBrainState/
-  // recalculateBrainState. This function is also the one
-  // `evaluateContract` (commitment-contract resolution, real token stakes)
-  // calls to compute "days hit" — grouping by a raw UTC day instead could
-  // attribute a late-evening focus session to the wrong day for any
-  // non-UTC user and flip a contract's outcome (CODE_REVIEW.md #17).
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { timezone: true },
-  });
-  const tz = resolveTimezone(user?.timezone);
+type DayGroupableEntry = { startedAt: Date; duration: number; category: AppCategory };
 
-  const entries = await prisma.screenTimeEntry.findMany({
-    where: {
-      userId,
-      startedAt: { gte: from, lte: to },
-    },
-    orderBy: { startedAt: 'asc' },
-  });
-
-  // Group entries by the user's local day.
-  const dayMap = new Map<string, typeof entries>();
+/**
+ * Groups entries into DailySummary buckets keyed by the user's LOCAL
+ * calendar day (via `localDayKey`), matching getTodaySummary/
+ * updateBrainState/recalculateBrainState. This is also what `evaluateContract`
+ * (commitment-contract resolution, real token stakes) uses to compute "days
+ * hit" — grouping by a raw UTC day instead could attribute a late-evening
+ * focus session to the wrong day for any non-UTC user and flip a contract's
+ * outcome (CODE_REVIEW.md #17).
+ */
+function summarizeEntriesByLocalDay(entries: DayGroupableEntry[], tz: string): DailySummary[] {
+  const dayMap = new Map<string, DayGroupableEntry[]>();
   for (const entry of entries) {
     const dayKey = localDayKey(entry.startedAt, tz);
     const existing = dayMap.get(dayKey);
@@ -280,17 +319,136 @@ export async function getRangeData(
     const brainHealth = calculateHealth(totalSeconds, focusSeconds);
     const categories = buildCategoryBreakdown(dayEntries, totalSeconds);
 
-    summaries.push({
-      date,
-      totalSeconds,
-      focusSeconds,
-      brainHealth,
-      brainTier,
-      categories,
-    });
+    summaries.push({ date, totalSeconds, focusSeconds, brainHealth, brainTier, categories });
   }
 
   return summaries.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export async function getRangeData(
+  userId: string,
+  from: Date,
+  to: Date,
+  client: QueryClient = prisma
+): Promise<DailySummary[]> {
+  const tz = await resolveUserTz(userId, client);
+  const entries = await client.screenTimeEntry.findMany({
+    where: {
+      userId,
+      startedAt: { gte: from, lte: to },
+    },
+    orderBy: { startedAt: 'asc' },
+  });
+
+  return summarizeEntriesByLocalDay(entries, tz);
+}
+
+/** Same as getRangeData but limited to VERIFIED-attested entries. Used by evaluate-contract in 'strict' mode and for 'flag'-mode observability logging. */
+export async function getAttestedRangeData(
+  userId: string,
+  from: Date,
+  to: Date,
+  client: QueryClient = prisma
+): Promise<DailySummary[]> {
+  const tz = await resolveUserTz(userId, client);
+  const entries = await client.screenTimeEntry.findMany({
+    where: {
+      userId,
+      attestationStatus: 'VERIFIED',
+      startedAt: { gte: from, lte: to },
+    },
+    orderBy: { startedAt: 'asc' },
+  });
+
+  return summarizeEntriesByLocalDay(entries, tz);
+}
+
+// ─── Pool settlement window health (attested-only coverage floor) ────────────
+
+/** Fraction of window-days that must be covered (checked in at all) for a window to count as real data. */
+export const WINDOW_MIN_COVERAGE_RATIO = 0.5;
+
+async function resolveUserTz(userId: string, client: QueryClient): Promise<string> {
+  const user = await client.user.findUnique({ where: { id: userId }, select: { timezone: true } });
+  return resolveTimezone(user?.timezone);
+}
+
+function computeWindowHealth(
+  dailySummaries: DailySummary[],
+  coveredDayKeys: Set<string>,
+  orderedDayKeys: string[]
+): WindowHealth {
+  const windowDays = orderedDayKeys.length;
+  const coverageRatio = windowDays > 0 ? coveredDayKeys.size / windowDays : 0;
+
+  if (coveredDayKeys.size === 0 || coverageRatio < WINDOW_MIN_COVERAGE_RATIO) {
+    return { healthPercent: 0, hasData: false, coveredDays: coveredDayKeys.size, windowDays, totalSeconds: 0, focusSeconds: 0 };
+  }
+
+  const summaryByDay = new Map(dailySummaries.map((s) => [s.date, s]));
+  let healthSum = 0;
+  for (const dayKey of orderedDayKeys) {
+    if (!coveredDayKeys.has(dayKey)) continue; // uncovered day contributes 0
+    const s = summaryByDay.get(dayKey);
+    healthSum += s ? calculateHealth(s.totalSeconds, s.focusSeconds) : calculateHealth(0, 0); // checked-in-but-quiet day
+  }
+  const healthPercent = Math.round(healthSum / windowDays);
+
+  return {
+    healthPercent,
+    hasData: true,
+    coveredDays: coveredDayKeys.size,
+    windowDays,
+    totalSeconds: dailySummaries.reduce((s, d) => s + d.totalSeconds, 0),
+    focusSeconds: dailySummaries.reduce((s, d) => s + d.focusSeconds, 0),
+  };
+}
+
+/** All-data window health (used for pool/contract scoring in 'off'/'flag' enforcement modes). */
+export async function getWindowHealth(
+  userId: string,
+  from: Date,
+  to: Date,
+  client: QueryClient = prisma
+): Promise<WindowHealth> {
+  const tz = await resolveUserTz(userId, client);
+  const orderedDayKeys = localDayKeysInRange(from, to, tz);
+  const entries = await client.screenTimeEntry.findMany({
+    where: { userId, startedAt: { gte: from, lte: to } },
+    orderBy: { startedAt: 'asc' },
+  });
+  const dailySummaries = summarizeEntriesByLocalDay(entries, tz);
+  const coveredDayKeys = new Set(dailySummaries.map((s) => s.date));
+  return computeWindowHealth(dailySummaries, coveredDayKeys, orderedDayKeys);
+}
+
+/**
+ * Attested-only window health (used for pool/contract scoring in 'strict'
+ * enforcement mode). Coverage is the union of days with VERIFIED entries and
+ * days with an AttestationVerification check-in — so a quiet day with an
+ * attested zero-entry batch still counts as covered.
+ */
+export async function getAttestedWindowHealth(
+  userId: string,
+  from: Date,
+  to: Date,
+  client: QueryClient = prisma
+): Promise<WindowHealth> {
+  const tz = await resolveUserTz(userId, client);
+  const orderedDayKeys = localDayKeysInRange(from, to, tz);
+  const [entries, verifications] = await Promise.all([
+    client.screenTimeEntry.findMany({
+      where: { userId, attestationStatus: 'VERIFIED', startedAt: { gte: from, lte: to } },
+      orderBy: { startedAt: 'asc' },
+    }),
+    client.attestationVerification.findMany({ where: { userId, verifiedAt: { gte: from, lte: to } } }),
+  ]);
+  const dailySummaries = summarizeEntriesByLocalDay(entries, tz);
+  const coveredDayKeys = new Set([
+    ...dailySummaries.map((s) => s.date),
+    ...verifications.map((v) => localDayKey(v.verifiedAt, tz)),
+  ]);
+  return computeWindowHealth(dailySummaries, coveredDayKeys, orderedDayKeys);
 }
 
 export async function getAppsBreakdown(

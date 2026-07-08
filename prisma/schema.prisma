@@ -10,54 +10,57 @@ datasource db {
 // ─── User & Authentication ───────────────────────────────────────────────────
 
 model User {
-  id             String   @id @default(uuid())
-  email          String   @unique
-  username       String   @unique
-  passwordHash   String?
-  avatarUrl      String?
+  id           String  @id @default(uuid())
+  email        String  @unique
+  username     String  @unique
+  passwordHash String?
+  avatarUrl    String?
 
   // OAuth
-  appleId        String?  @unique
-  googleId       String?  @unique
+  appleId  String? @unique
+  googleId String? @unique
 
   // Profile
-  displayName    String?
-  bio            String?
-  timezone       String   @default("UTC")
+  displayName String?
+  bio         String?
+  timezone    String  @default("UTC")
 
   // Brain state
-  brainHealth    Int      @default(100) // 0-100 percentage
-  brainTier      BrainTier @default(PRISTINE)
+  brainHealth Int       @default(100) // 0-100 percentage
+  brainTier   BrainTier @default(PRISTINE)
 
   // Streak
-  currentStreak  Int      @default(0)
-  longestStreak  Int      @default(0)
+  currentStreak Int @default(0)
+  longestStreak Int @default(0)
 
   // Timestamps
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  lastLoginAt    DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lastLoginAt DateTime?
 
   // Relations
-  sessions       Session[]
-  twoFactor      TwoFactorSetting?
-  tokenWallet    TokenWallet?
-  friendshipsInitiated Friendship[] @relation("FriendshipInitiator")
-  friendshipsReceived  Friendship[] @relation("FriendshipReceiver")
-  friendRequestsSent   FriendRequest[] @relation("FriendRequestSender")
-  friendRequestsReceived FriendRequest[] @relation("FriendRequestReceiver")
-  blockedUsers         BlockedUser[]     @relation("Blocker")
-  blockedByUsers       BlockedUser[]     @relation("Blocked")
-  screenTimeEntries    ScreenTimeEntry[]
-  brainStates          BrainState[]
-  poolParticipants     PoolParticipant[]
-  poolsCreated         Pool[]            @relation("PoolCreator")
-  paymentAccounts      PaymentAccount[]
-  powerUps             PowerUp[]
-  userCosmetics        UserCosmetic[]
-  commitmentContracts  CommitmentContract[]
-  wheelSpins           WheelSpin[]
-  devices              Device[]
+  sessions                 Session[]
+  twoFactor                TwoFactorSetting?
+  tokenWallet              TokenWallet?
+  friendshipsInitiated     Friendship[]              @relation("FriendshipInitiator")
+  friendshipsReceived      Friendship[]              @relation("FriendshipReceiver")
+  friendRequestsSent       FriendRequest[]           @relation("FriendRequestSender")
+  friendRequestsReceived   FriendRequest[]           @relation("FriendRequestReceiver")
+  blockedUsers             BlockedUser[]             @relation("Blocker")
+  blockedByUsers           BlockedUser[]             @relation("Blocked")
+  screenTimeEntries        ScreenTimeEntry[]
+  brainStates              BrainState[]
+  poolParticipants         PoolParticipant[]
+  poolsCreated             Pool[]                    @relation("PoolCreator")
+  paymentAccounts          PaymentAccount[]
+  powerUps                 PowerUp[]
+  userCosmetics            UserCosmetic[]
+  commitmentContracts      CommitmentContract[]
+  wheelSpins               WheelSpin[]
+  devices                  Device[]
+  attestedDevices          AttestedDevice[]
+  attestationChallenges    AttestationChallenge[]
+  attestationVerifications AttestationVerification[]
 }
 
 model Device {
@@ -97,32 +100,32 @@ model Session {
 }
 
 model TwoFactorSetting {
-  id              String   @id @default(uuid())
-  userId          String   @unique
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  totpSecret      String?
-  totpEnabled     Boolean  @default(false)
-  backupCodes     String[] // hashed backup codes
+  totpSecret  String?
+  totpEnabled Boolean  @default(false)
+  backupCodes String[] // hashed backup codes
 
-  smsEnabled      Boolean  @default(false)
-  smsPhoneNumber  String?
+  smsEnabled     Boolean @default(false)
+  smsPhoneNumber String?
 
-  emailEnabled    Boolean  @default(false)
+  emailEnabled Boolean @default(false)
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ─── Friends ─────────────────────────────────────────────────────────────────
 
 model Friendship {
-  id         String   @id @default(uuid())
-  userId     String
-  friendId   String
-  user       User     @relation("FriendshipInitiator", fields: [userId], references: [id], onDelete: Cascade)
-  friend     User     @relation("FriendshipReceiver", fields: [friendId], references: [id], onDelete: Cascade)
-  createdAt  DateTime @default(now())
+  id        String   @id @default(uuid())
+  userId    String
+  friendId  String
+  user      User     @relation("FriendshipInitiator", fields: [userId], references: [id], onDelete: Cascade)
+  friend    User     @relation("FriendshipReceiver", fields: [friendId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
 
   @@unique([userId, friendId])
   @@index([userId])
@@ -176,15 +179,15 @@ model TokenWallet {
 }
 
 model TokenTransaction {
-  id          String            @id @default(uuid())
-  walletId    String
-  wallet      TokenWallet       @relation(fields: [walletId], references: [id], onDelete: Cascade)
-  amount      Int               // positive = credit, negative = debit
-  type        TransactionType
-  description String?
-  referenceId String?           // pool_id, purchase_id, etc.
-  balanceAfter Int              // snapshot of balance after this tx
-  createdAt   DateTime          @default(now())
+  id           String          @id @default(uuid())
+  walletId     String
+  wallet       TokenWallet     @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  amount       Int // positive = credit, negative = debit
+  type         TransactionType
+  description  String?
+  referenceId  String? // pool_id, purchase_id, etc.
+  balanceAfter Int // snapshot of balance after this tx
+  createdAt    DateTime        @default(now())
 
   @@index([walletId])
   @@index([createdAt])
@@ -205,23 +208,23 @@ enum TransactionType {
 }
 
 model Pool {
-  id            String        @id @default(uuid())
-  creatorId     String
-  creator       User          @relation("PoolCreator", fields: [creatorId], references: [id], onDelete: Cascade)
-  name          String
-  description   String?
-  entryFee      Int           // in tokens
+  id              String     @id @default(uuid())
+  creatorId       String
+  creator         User       @relation("PoolCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  entryFee        Int // in tokens
   maxParticipants Int?
-  status        PoolStatus    @default(OPEN)
-  potTotal      Int           @default(0)
-  startedAt     DateTime?
-  endsAt        DateTime
-  settledAt     DateTime?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  status          PoolStatus @default(OPEN)
+  potTotal        Int        @default(0)
+  startedAt       DateTime?
+  endsAt          DateTime
+  settledAt       DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
-  participants  PoolParticipant[]
-  ledger        PoolLedger[]
+  participants PoolParticipant[]
+  ledger       PoolLedger[]
 
   @@index([status])
   @@index([creatorId])
@@ -235,7 +238,7 @@ model PoolParticipant {
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   entryFeePaid Int       @default(0)
   tokensWon    Int       @default(0)
-  focusScore   Float?    // calculated at settlement
+  focusScore   Float? // calculated at settlement
   joinedAt     DateTime  @default(now())
   leftAt       DateTime?
 
@@ -245,13 +248,13 @@ model PoolParticipant {
 }
 
 model PoolLedger {
-  id          String       @id @default(uuid())
+  id          String         @id @default(uuid())
   poolId      String
-  pool        Pool         @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  pool        Pool           @relation(fields: [poolId], references: [id], onDelete: Cascade)
   type        PoolLedgerType
   amount      Int
   description String
-  createdAt   DateTime     @default(now())
+  createdAt   DateTime       @default(now())
 
   @@index([poolId])
 }
@@ -272,15 +275,15 @@ enum PoolLedgerType {
 }
 
 model PaymentAccount {
-  id            String   @id @default(uuid())
-  userId        String   @unique
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  stripeCustomerId String? @unique
-  stripeConnectedAccountId String? @unique
-  paymentMethod String?  // 'stripe', 'paypal', etc.
-  last4         String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                       String   @id @default(uuid())
+  userId                   String   @unique
+  user                     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stripeCustomerId         String?  @unique
+  stripeConnectedAccountId String?  @unique
+  paymentMethod            String? // 'stripe', 'paypal', etc.
+  last4                    String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 
   @@index([userId])
 }
@@ -288,20 +291,24 @@ model PaymentAccount {
 // ─── Screen Time ─────────────────────────────────────────────────────────────
 
 model ScreenTimeEntry {
-  id          String       @id @default(uuid())
-  userId      String
-  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  appName     String
-  appBundleId String?      // iOS bundle identifier
-  category    AppCategory
-  duration    Int          // in seconds
-  startedAt   DateTime
-  endedAt     DateTime?
-  isBlacklisted Boolean    @default(false)
-  createdAt   DateTime     @default(now())
+  id                        String                   @id @default(uuid())
+  userId                    String
+  user                      User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appName                   String
+  appBundleId               String? // iOS bundle identifier
+  category                  AppCategory
+  duration                  Int // in seconds
+  startedAt                 DateTime
+  endedAt                   DateTime?
+  isBlacklisted             Boolean                  @default(false)
+  attestationStatus         EntryAttestation         @default(UNATTESTED)
+  attestationVerificationId String?
+  attestationVerification   AttestationVerification? @relation(fields: [attestationVerificationId], references: [id], onDelete: SetNull)
+  createdAt                 DateTime                 @default(now())
 
   @@index([userId, startedAt])
   @@index([userId, category])
+  @@index([userId, attestationStatus])
 }
 
 enum AppCategory {
@@ -316,69 +323,69 @@ enum AppCategory {
 }
 
 model BrainState {
-  id              String    @id @default(uuid())
-  userId          String
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  date            DateTime  @db.Date
-  tier            BrainTier @default(PRISTINE)
-  healthPercent   Int       @default(100) // 0-100
-  totalScreenTime Int       @default(0)  // seconds
-  focusTime       Int       @default(0)  // seconds
-  categoryBreakdown Json?   // { SOCIAL: 3600, GAMES: 1800, ... }
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id                String    @id @default(uuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date              DateTime  @db.Date
+  tier              BrainTier @default(PRISTINE)
+  healthPercent     Int       @default(100) // 0-100
+  totalScreenTime   Int       @default(0) // seconds
+  focusTime         Int       @default(0) // seconds
+  categoryBreakdown Json? // { SOCIAL: 3600, GAMES: 1800, ... }
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   @@unique([userId, date])
   @@index([userId, date])
 }
 
 enum BrainTier {
-  PRISTINE    // Tier 1: 0-100% focus target maintained
-  FOG         // Tier 2: approaching limits
-  SLIME       // Tier 3: exceeding limits
-  GRAY_VOID   // Tier 4: prolonged failure
+  PRISTINE // Tier 1: 0-100% focus target maintained
+  FOG // Tier 2: approaching limits
+  SLIME // Tier 3: exceeding limits
+  GRAY_VOID // Tier 4: prolonged failure
 }
 
 // ─── Power-Ups ────────────────────────────────────────────────────────────────
 
 model PowerUp {
-  id          String       @id @default(uuid())
-  userId      String
-  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type        PowerUpType
-  quantity    Int          @default(1)
-  activatedAt DateTime?    // when the power-up was activated (null = inactive)
-  expiresAt   DateTime?    // when the power-up effect ends
-  targetPoolId String?     // for Bounty: which pool it's targeting
-  targetUserId String?     // for Bounty: which user has the bounty
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  id           String      @id @default(uuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         PowerUpType
+  quantity     Int         @default(1)
+  activatedAt  DateTime? // when the power-up was activated (null = inactive)
+  expiresAt    DateTime? // when the power-up effect ends
+  targetPoolId String? // for Bounty: which pool it's targeting
+  targetUserId String? // for Bounty: which user has the bounty
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
 
   @@index([userId, type])
   @@index([userId, activatedAt])
 }
 
 enum PowerUpType {
-  BOUNTY          // Steal tokens from a party member who fails their target
-  BS              // View your bounty status
-  BS_PLUS         // View bounty status + exact decrease needed to win
-  DOUBLE_DOWN     // 2x point multiplier, but 2x brain rot speed
-  SLIME_SHIELD    // 3-hour protection from slime damage
-  INHALE_ASSIST   // Shorten next breathing gate by 5s per phase
+  BOUNTY // Steal tokens from a party member who fails their target
+  BS // View your bounty status
+  BS_PLUS // View bounty status + exact decrease needed to win
+  DOUBLE_DOWN // 2x point multiplier, but 2x brain rot speed
+  SLIME_SHIELD // 3-hour protection from slime damage
+  INHALE_ASSIST // Shorten next breathing gate by 5s per phase
 }
 
 // ─── Cortex Vault / Cosmetics ─────────────────────────────────────────────────
 
 model CosmeticItem {
-  id          String       @id @default(uuid())
-  name        String       @unique
+  id          String         @id @default(uuid())
+  name        String         @unique
   description String?
   type        CosmeticType
   rarity      CosmeticRarity @default(COMMON)
-  price       Int          @default(0) // in tokens, 0 = wheel-exclusive
-  assetUrl    String?      // URL to the cosmetic asset/image
-  seasonalTag String?      // e.g., "halloween-2025", "winter-2026"
-  createdAt   DateTime     @default(now())
+  price       Int            @default(0) // in tokens, 0 = wheel-exclusive
+  assetUrl    String? // URL to the cosmetic asset/image
+  seasonalTag String? // e.g., "halloween-2025", "winter-2026"
+  createdAt   DateTime       @default(now())
 
   userCosmetics UserCosmetic[]
 }
@@ -402,13 +409,13 @@ enum CosmeticRarity {
 }
 
 model UserCosmetic {
-  id          String       @id @default(uuid())
-  userId      String
-  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  cosmeticId  String
-  cosmetic    CosmeticItem @relation(fields: [cosmeticId], references: [id], onDelete: Cascade)
-  equipped    Boolean      @default(false)
-  acquiredAt  DateTime     @default(now())
+  id         String       @id @default(uuid())
+  userId     String
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cosmeticId String
+  cosmetic   CosmeticItem @relation(fields: [cosmeticId], references: [id], onDelete: Cascade)
+  equipped   Boolean      @default(false)
+  acquiredAt DateTime     @default(now())
 
   @@unique([userId, cosmeticId])
   @@index([userId, equipped])
@@ -417,23 +424,23 @@ model UserCosmetic {
 // ─── Commitment Contracts ─────────────────────────────────────────────────────
 
 model CommitmentContract {
-  id              String        @id @default(uuid())
-  userId          String
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name            String
-  description     String?
-  pledgeAmount    Int           // in cents (real money)
-  stripePaymentId String?       @unique // Stripe PaymentIntent ID
-  status          ContractStatus @default(ACTIVE)
-  targetScreenTime Int          // daily target in seconds
-  startDate       DateTime
-  endDate         DateTime
-  charityName     String?       // where forfeited money goes
-  charityStripeId String?       // Stripe Connect account for charity
-  completedAt     DateTime?
-  forfeitedAt     DateTime?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  id               String         @id @default(uuid())
+  userId           String
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name             String
+  description      String?
+  pledgeAmount     Int // in cents (real money)
+  stripePaymentId  String?        @unique // Stripe PaymentIntent ID
+  status           ContractStatus @default(ACTIVE)
+  targetScreenTime Int // daily target in seconds
+  startDate        DateTime
+  endDate          DateTime
+  charityName      String? // where forfeited money goes
+  charityStripeId  String? // Stripe Connect account for charity
+  completedAt      DateTime?
+  forfeitedAt      DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
   @@index([userId, status])
 }
@@ -445,16 +452,88 @@ enum ContractStatus {
   CANCELLED
 }
 
+// ─── Device Attestation (App Attest) ─────────────────────────────────────────
+
+enum AttestationStatus {
+  PENDING
+  VERIFIED
+  FAILED
+  REVOKED
+}
+
+enum EntryAttestation {
+  UNATTESTED
+  VERIFIED
+  FAILED
+}
+
+enum ChallengePurpose {
+  KEY_ATTESTATION
+  UPLOAD_ASSERTION
+}
+
+model AttestedDevice {
+  id                String            @id @default(uuid())
+  userId            String
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  keyId             String            @unique
+  publicKeyPem      String
+  attestationStatus AttestationStatus @default(VERIFIED)
+  signCount         Int               @default(0)
+  registeredAt      DateTime          @default(now())
+  lastVerifiedAt    DateTime?
+  revokedAt         DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  verifications AttestationVerification[]
+
+  @@index([userId])
+  @@index([userId, attestationStatus])
+  @@map("attested_devices")
+}
+
+model AttestationChallenge {
+  id         String           @id @default(uuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nonce      String           @unique
+  purpose    ChallengePurpose
+  consumedAt DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime         @default(now())
+
+  @@index([userId, purpose])
+  @@index([expiresAt])
+  @@map("attestation_challenges")
+}
+
+model AttestationVerification {
+  id               String         @id @default(uuid())
+  userId           String
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  attestedDeviceId String
+  attestedDevice   AttestedDevice @relation(fields: [attestedDeviceId], references: [id], onDelete: Cascade)
+  signCount        Int
+  verifiedAt       DateTime       @default(now())
+  entryCount       Int            @default(0)
+
+  entries ScreenTimeEntry[]
+
+  @@index([userId, verifiedAt])
+  @@map("attestation_verifications")
+}
+
 // ─── Durable cache (Postgres-backed KV with TTL) ─────────────────────────────
 
 /// Generic key-value cache backed by Postgres. Replaces in-memory Maps that
 /// evaporate on restart. Used for SMS/email verification codes and Stripe
 /// idempotency keys. Rows are cleaned up by the `cache-cleanup` pg-boss job.
 model CacheEntry {
-  key        String   @id
-  value      String   // JSON-serialized value
-  expiresAt  DateTime
-  createdAt  DateTime @default(now())
+  key       String   @id
+  value     String // JSON-serialized value
+  expiresAt DateTime
+  createdAt DateTime @default(now())
 
   @@index([expiresAt])
   @@map("cache_entries")
@@ -463,14 +542,14 @@ model CacheEntry {
 // ─── Token Wheel (Gacha) ─────────────────────────────────────────────────────
 
 model WheelSpin {
-  id          String       @id @default(uuid())
-  userId      String
-  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  cost        Int          @default(10) // tokens spent
-  rewardType   String      // 'credits', 'power_up', 'cosmetic'
-  rewardId    String?      // power_up_id or cosmetic_id
-  rewardAmount Int         @default(15) // credits earned (minimum 15)
-  createdAt   DateTime     @default(now())
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cost         Int      @default(10) // tokens spent
+  rewardType   String // 'credits', 'power_up', 'cosmetic'
+  rewardId     String? // power_up_id or cosmetic_id
+  rewardAmount Int      @default(15) // credits earned (minimum 15)
+  createdAt    DateTime @default(now())
 
   @@index([userId, createdAt])
 }

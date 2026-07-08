@@ -53,3 +53,17 @@ export const wheelLimiter = rateLimit({
     return req.user?.userId ?? req.ip ?? 'unknown';
   },
 });
+
+/**
+ * Attestation challenge/registration limiter. 20/min per user — generous for
+ * legitimate app usage (one challenge per upload, occasional re-registration)
+ * but stops a script from hammering the challenge endpoint to farm nonces.
+ */
+export const attestationLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attestation requests, please try again in a moment.' },
+  keyGenerator: (req) => req.user?.userId ?? req.ip ?? 'unknown',
+});

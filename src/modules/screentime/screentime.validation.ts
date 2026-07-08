@@ -28,9 +28,12 @@ interface RawEntry {
 }
 
 export const batchUpload = [
+  // No `min` here — an empty array is a valid attested quiet-day check-in
+  // (see the attestationNonce rule below), which upstream's plain
+  // non-empty-array check didn't anticipate. `max` is still enforced.
   body('entries')
-    .isArray({ min: 1, max: MAX_ENTRIES_PER_BATCH })
-    .withMessage(`entries must be a non-empty array of at most ${MAX_ENTRIES_PER_BATCH} items`),
+    .isArray({ max: MAX_ENTRIES_PER_BATCH })
+    .withMessage(`entries must be an array of at most ${MAX_ENTRIES_PER_BATCH} items`),
   body('entries.*.appName')
     .notEmpty()
     .withMessage('appName is required'),
@@ -84,6 +87,21 @@ export const batchUpload = [
     }
     return true;
   }),
+  // A quiet-day check-in (zero usage) is sent as an empty entries array plus
+  // an attestationNonce — proving a genuine device checked in that day
+  // without fabricating a placeholder entry. An empty, unattested batch has
+  // nothing to store and nothing to verify, so it's rejected.
+  body('entries').custom((entries, { req }) => {
+    if (Array.isArray(entries) && entries.length === 0 && !req.body.attestationNonce) {
+      throw new Error('An empty entries array requires an attestationNonce check-in');
+    }
+    return true;
+  }),
+  body('attestationNonce')
+    .optional()
+    .isString()
+    .notEmpty()
+    .withMessage('attestationNonce must be a non-empty string'),
 ];
 
 export const dateRange = [

@@ -104,3 +104,21 @@ export function localDayKey(instant: Date, timezone: string): string {
   const tz = resolveTimezone(timezone);
   return toZonedTime(instant, tz).toISOString().slice(0, 10);
 }
+
+/**
+ * Ordered list of local calendar-day keys spanning [from, to] in `timezone`,
+ * DST-safe (built from real local-day boundaries rather than a raw
+ * millisecond division, which miscounts across DST transitions). Used by the
+ * pools coverage-floor window, which needs the actual count of local days a
+ * settlement window spans, not just membership.
+ */
+export function localDayKeysInRange(from: Date, to: Date, timezone: string): string[] {
+  const tz = resolveTimezone(timezone);
+  const keys: string[] = [];
+  let cursor = getUtcDayBoundary(tz, from).dayStart;
+  while (cursor.getTime() <= to.getTime()) {
+    keys.push(localDayKey(cursor, tz));
+    cursor = new Date(getUtcDayBoundary(tz, cursor).dayEnd.getTime() + 1);
+  }
+  return keys;
+}

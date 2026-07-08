@@ -28,6 +28,7 @@ export const openapiSpec = {
     { name: 'Tokens & Payments', description: 'Balance, transactions, Stripe deposits/withdrawals' },
     { name: 'Pools', description: 'Cash pools — create, join, settle' },
     { name: 'Screen Time', description: 'Upload and query device screen time' },
+    { name: 'Attestation', description: 'Apple App Attest device-integrity verification' },
     { name: 'Power-Ups & Cosmetics', description: 'Token wheel, power-ups, Cortex Vault' },
     { name: 'Commitment Contracts', description: 'Self-imposed goal contracts with stakes' },
     { name: 'System', description: 'Health and docs' },
@@ -803,14 +804,14 @@ export const openapiSpec = {
         description:
           "Only the pool creator or a participant can trigger settlement, and only after the pool " +
           "ends. The winner is derived entirely from each participant's real screen-time/focus data " +
-          "over the pool's active window — this endpoint takes no body and does not accept a " +
-          "client-supplied winner. Ties split the payout evenly; if no participant has any " +
-          "verifiable activity data, every entry fee is refunded in full instead of an arbitrary payout.",
+          "over the pool's shared settlement window — this endpoint takes no body and does not " +
+          "accept a client-supplied winner. If no participant has any verifiable activity data, " +
+          "every entry fee is refunded in full and the pool is cancelled instead of an arbitrary payout.",
         parameters: [{ name: 'poolId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
         responses: {
-          '200': { description: 'Pool settled' },
+          '200': { description: 'Pool settled or cancelled-and-refunded' },
           '403': { description: 'Not the creator or a participant' },
-          '409': { description: 'Pool has already been settled' },
+          '409': { description: 'Pool is already being settled (concurrent settle attempt)' },
         },
       },
     },
@@ -828,6 +829,16 @@ export const openapiSpec = {
       post: {
         tags: ['Screen Time'],
         summary: 'Bulk upload screen time entries from the device',
+        description:
+          'Accepts an optional `attestationNonce` field plus an `x-attestation` request header ' +
+          '(base64 JSON: `{ keyId, assertion }`) to prove the upload came from a genuine, unmodified ' +
+          'app instance — see the Attestation endpoints. The assertion is signed over the exact raw ' +
+          'bytes of this request body, so it cannot also live inside the body it is attesting to. ' +
+          '`entries` may be empty when `attestationNonce` is present, to register an attested ' +
+          'zero-usage "quiet day" check-in without fabricating a placeholder entry; an empty, ' +
+          'unattested batch is rejected. Depending on ATTESTATION_ENFORCEMENT, an upload without a ' +
+          'valid attestation is either accepted-and-flagged (`off`/`flag`) or rejected outright ' +
+          '(`strict`).',
         requestBody: {
           required: true,
           content: {
@@ -852,12 +863,26 @@ export const openapiSpec = {
                       },
                     },
                   },
+                  attestationNonce: {
+                    type: 'string',
+                    description: 'Nonce from POST /api/attestation/challenge (purpose=UPLOAD_ASSERTION). Required when entries is empty.',
+                  },
                 },
               },
             },
           },
         },
-        responses: { '201': { description: 'Entries stored' } },
+        parameters: [{
+          name: 'x-attestation',
+          in: 'header',
+          required: false,
+          schema: { type: 'string' },
+          description: 'base64 JSON { keyId, assertion } — required alongside attestationNonce to verify the upload.',
+        }],
+        responses: {
+          '201': { description: 'Entries stored, response includes attestationStatus: VERIFIED | FAILED | UNATTESTED' },
+          '401': { description: 'Valid attestation required (ATTESTATION_ENFORCEMENT=strict only)' },
+        },
       },
     },
     '/api/screentime/today': {
@@ -905,6 +930,59 @@ export const openapiSpec = {
         tags: ['Screen Time'],
         summary: 'Get the currently active app session',
         responses: { '200': { description: 'Active session or null' } },
+      },
+    },
+
+    // ─── Attestation ────────────────────────────────────────────────────────
+    '/api/attestation/challenge': {
+      post: {
+        tags: ['Attestation'],
+        summary: 'Issue a single-use nonce for App Attest key registration or upload assertion',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['purpose'],
+                properties: { purpose: { type: 'string', enum: ['KEY_ATTESTATION', 'UPLOAD_ASSERTION'] } },
+              },
+            },
+          },
+        },
+        responses: { '201': { description: 'Challenge issued: { nonce, purpose, expiresAt }' } },
+      },
+    },
+    '/api/attestation/register-key': {
+      post: {
+        tags: ['Attestation'],
+        summary: 'Register a device\'s App Attest key after key generation + attestation',
+        description:
+          'Verifies the attestation object against Apple\'s App Attest root of trust and the ' +
+          'previously-issued challenge nonce, then stores the device\'s public key for verifying ' +
+          'future upload assertions.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['keyId', 'attestationObject', 'nonce'],
+                properties: {
+                  keyId: { type: 'string' },
+                  attestationObject: { type: 'string', description: 'base64-encoded CBOR attestation object' },
+                  nonce: { type: 'string', description: 'Nonce from a KEY_ATTESTATION challenge' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': { description: 'Device registered: { deviceId, keyId }' },
+          '400': { description: 'Invalid or expired challenge' },
+          '401': { description: 'Attestation verification failed' },
+          '409': { description: 'This device key is already registered' },
+        },
       },
     },
 

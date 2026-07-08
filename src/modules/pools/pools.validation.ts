@@ -33,3 +33,9 @@ export const joinPool = [
     .isUUID()
     .withMessage('poolId must be a valid UUID'),
 ];
+
+export const settlePool = [
+  param('poolId')
+    .isUUID()
+    .withMessage('poolId must be a valid UUID'),
+];

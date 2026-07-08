@@ -22,8 +22,9 @@
 import { prisma } from '../../config/database.js';
 import { logger } from '../../config/logger.js';
 import { AppError } from '../../middleware/errorHandler.js';
-import { getRangeData } from '../../modules/screentime/screentime.service.js';
-import { creditTokens } from '../../modules/tokens/tokens.service.js';
+import { getRangeData, getAttestedRangeData } from '../../modules/screentime/screentime.service.js';
+import { creditTokensTx } from '../../modules/tokens/tokens.service.js';
+import { getEnforcementMode } from '../../modules/attestation/attestation.service.js';
 import { appEvents } from '../events.js';
 
 /** Fraction of days the user must hit their target to "pass" the contract. */
@@ -73,13 +74,25 @@ export async function evaluateContract(
       return null;
     }
 
-    // Slice the contract window into local days (timezone-aware, per
-    // `getRangeData`) and sum focus seconds per day.
-    const dailySummaries = await getRangeData(
-      contract.userId,
-      contract.startDate,
-      contract.endDate,
-    );
+    // Money-scoring only uses attested-only data in 'strict' mode — 'off'
+    // and 'flag' score off all data, identical to pre-attestation behavior,
+    // so trialing attestation never costs a real user their stake. Reads
+    // happen inside `tx` (both getRangeData/getAttestedRangeData accept a
+    // client param) so they see this transaction's own snapshot.
+    const mode = getEnforcementMode();
+    const dailySummaries = mode === 'strict'
+      ? await getAttestedRangeData(contract.userId, contract.startDate, contract.endDate, tx)
+      : await getRangeData(contract.userId, contract.startDate, contract.endDate, tx);
+
+    if (mode === 'flag') {
+      const attestedOnly = await getAttestedRangeData(contract.userId, contract.startDate, contract.endDate, tx);
+      if (attestedOnly.length < dailySummaries.length) {
+        logger.warn(
+          { contractId, attestedDays: attestedOnly.length, totalDaysWithData: dailySummaries.length },
+          'Contract resolution: some days had only unattested screen-time data (excluded from a strict-mode decision, not from this one)',
+        );
+      }
+    }
 
     const daysTotal = Math.max(
       Math.ceil(
@@ -107,26 +120,27 @@ export async function evaluateContract(
     }
 
     if (met) {
-      // Credit the pledge back. `tx` is threaded through so this write
-      // commits/rolls back atomically together with the contract's status
-      // update below — previously this called `creditTokens` without `tx`,
-      // which opened its OWN independent transaction; if anything after it
-      // in this function later failed, the credit would already have
-      // committed while the contract stayed ACTIVE, and a retry could pay
-      // the pledge out a second time (CODE_REVIEW.md #10). Using
-      // 'CONTRACT_PAYOUT' as the ledger type here (rather than a generic
-      // 'EARNED') also means this is the single, correctly-categorized
-      // ledger row for the payout — the old code additionally wrote a
-      // second manual 'CONTRACT_PAYOUT' transaction for the same amount,
-      // double-counting the payout in the user's transaction history even
-      // though the wallet balance only actually increased once.
-      await creditTokens(
+      // Credit the pledge back, inside this same transaction via `tx` — no
+      // nested transaction, no duplicate ledger row. Previously this called
+      // `creditTokens` without a transaction client, which opened its OWN
+      // independent transaction; if anything after it in this function later
+      // failed, the credit would already have committed while the contract
+      // stayed ACTIVE, and a retry could pay the pledge out a second time
+      // (CODE_REVIEW.md #10). Using 'CONTRACT_PAYOUT' as the ledger type here
+      // (rather than a generic 'EARNED') also means this is the single,
+      // correctly-categorized ledger row for the payout — the old code
+      // additionally wrote a second manual 'CONTRACT_PAYOUT' transaction for
+      // the same amount, double-counting the payout in the user's
+      // transaction history even though the wallet balance only actually
+      // increased once. `creditTokensTx` invalidates the balance cache
+      // itself, so no separate post-commit invalidation is needed here.
+      await creditTokensTx(
+        tx,
         contract.userId,
         contract.pledgeAmount,
         'CONTRACT_PAYOUT',
         `Payout for completed commitment: ${contract.name}`,
         contract.id,
-        tx,
       );
 
       await tx.commitmentContract.update({

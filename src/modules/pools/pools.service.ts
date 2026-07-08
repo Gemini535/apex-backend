@@ -1,8 +1,10 @@
 import { prisma } from '../../config/database.js';
+import { env } from '../../config/env.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import type { PoolLedgerType, PoolStatus } from '@prisma/client';
 import { creditTokens, debitTokens } from '../tokens/tokens.service.js';
-import { getRangeData } from '../screentime/screentime.service.js';
+import { getWindowHealth, getAttestedWindowHealth } from '../screentime/screentime.service.js';
+import { getEnforcementMode } from '../attestation/attestation.service.js';
 
 // ---------------------------------------------------------------------------
 // Create pool
@@ -26,6 +28,10 @@ export async function createPool(
         maxParticipants,
         status: 'OPEN' as PoolStatus,
         potTotal: 0,
+        // Pools start immediately on creation — there's no separate "activate"
+        // step. This is what the join cutoff and settlement scoring window
+        // are anchored to.
+        startedAt: new Date(),
         endsAt,
       },
     });
@@ -92,6 +98,12 @@ export async function joinPool(poolId: string, userId: string) {
     }
     if (pool.endsAt <= new Date()) {
       throw new AppError('Pool has already ended', 400);
+    }
+    // Fixed-cohort rule: once the join grace window after pool creation has
+    // elapsed, the roster locks — a late joiner would otherwise be scored at
+    // settlement over a shared window they weren't meaningfully present for.
+    if (pool.startedAt && Date.now() > pool.startedAt.getTime() + env.pools.joinGraceMs) {
+      throw new AppError('Pool has already started — no new participants may join', 400);
     }
     if (pool.creatorId === userId) {
       throw new AppError('Creator is already a participant', 400);
@@ -297,68 +309,29 @@ export async function listPools(
 // Settle pool
 // ---------------------------------------------------------------------------
 
-/**
- * Fraction of the pot taken as a platform fee on settlement.
- */
+/** Fraction of the pot taken as a platform fee on settlement. */
 const PLATFORM_FEE_RATE = 0.1;
 
-interface ParticipantScore {
-  participantId: string;
-  userId: string;
-  entryFeePaid: number;
-  avgHealth: number;
-}
-
 /**
- * Computes each active participant's real focus/brain-health score across
- * the pool's active window, instead of trusting a client-supplied winner.
+ * Settles a pool once its deadline has passed. The winner is derived
+ * entirely from each active participant's real screen-time/focus-health
+ * data over the pool's shared settlement window — the caller cannot pick
+ * who gets paid (CODE_REVIEW.md #2). If nobody clears the coverage floor
+ * (see getWindowHealth/getAttestedWindowHealth), every participant is
+ * refunded in full and the pool is cancelled instead of an arbitrary payout
+ * being made.
  *
- * Previously `settlePool` accepted an arbitrary `winnerUserId` from the
- * request body and paid that participant out with zero verification — any
- * pool creator could declare themselves (or a friend) the winner and
- * collect the pot. See CODE_REVIEW.md #2.
- */
-async function scoreParticipants(
-  poolCreatedAt: Date,
-  poolEndsAt: Date,
-  participants: { id: string; userId: string; entryFeePaid: number; joinedAt: Date; leftAt: Date | null }[],
-): Promise<ParticipantScore[]> {
-  const active = participants.filter((p) => !p.leftAt);
-
-  return Promise.all(
-    active.map(async (p) => {
-      const windowStart = poolCreatedAt > p.joinedAt ? poolCreatedAt : p.joinedAt;
-      const summaries = await getRangeData(p.userId, windowStart, poolEndsAt);
-      const avgHealth =
-        summaries.length > 0
-          ? summaries.reduce((sum, s) => sum + s.brainHealth, 0) / summaries.length
-          : 0;
-
-      return {
-        participantId: p.id,
-        userId: p.userId,
-        entryFeePaid: p.entryFeePaid,
-        avgHealth,
-      };
-    }),
-  );
-}
-
-/**
- * Settles a pool once its deadline has passed. The winner (or winners, in
- * the event of a tie) is derived entirely from each participant's real
- * screen-time/focus data over the pool's active window — the caller cannot
- * pick who gets paid. If nobody has any qualifying activity data, every
- * participant is refunded in full rather than an arbitrary payout being
- * made.
- *
- * Double-settlement is prevented by an atomic conditional `UPDATE` that
- * flips the pool's status away from OPEN/ACTIVE: Postgres takes a row lock
- * for the duration of that UPDATE, so a second concurrent settle call
- * blocks until the first commits, then observes `count === 0` and fails
- * cleanly instead of paying out twice (CODE_REVIEW.md #2).
+ * Double-settlement is prevented by a two-phase lock: the transaction first
+ * atomically claims `SETTLING` (a conditional UPDATE that only succeeds if
+ * the pool is still OPEN/ACTIVE — Postgres holds a row lock for the
+ * duration, so a concurrent settle call blocks, then observes `count === 0`
+ * and fails cleanly), then finalizes to SETTLED or CANCELLED at the end of
+ * the same transaction, re-asserting `status: 'SETTLING'` on that final
+ * update too so nothing else can interleave.
  */
 export async function settlePool(poolId: string) {
+  // Fast fail-fast reads outside the transaction — the real guard is the
+  // atomic SETTLING claim inside the transaction below.
   const existing = await prisma.pool.findUnique({
     where: { id: poolId },
     include: { participants: true },
@@ -369,102 +342,137 @@ export async function settlePool(poolId: string) {
   if (existing.endsAt >= new Date()) {
     throw new AppError('Pool has not ended yet', 400);
   }
-  if (existing.status !== ('OPEN' as PoolStatus) && existing.status !== ('ACTIVE' as PoolStatus)) {
+  if (
+    existing.status !== ('OPEN' as PoolStatus) &&
+    existing.status !== ('ACTIVE' as PoolStatus)
+  ) {
     throw new AppError('Pool can only be settled from OPEN or ACTIVE status', 400);
   }
 
+  // Participants who already left were refunded at leave-time — they aren't
+  // eligible to be scored, win, or be refunded again here.
   const activeParticipants = existing.participants.filter((p) => !p.leftAt);
   if (activeParticipants.length === 0) {
     throw new AppError('Pool has no remaining participants to settle', 400);
   }
 
-  // Data-derived scoring happens before we take the settlement lock so the
-  // (potentially slower) screen-time aggregation doesn't hold a row lock.
-  const scores = await scoreParticipants(existing.createdAt, existing.endsAt, existing.participants);
-  const bestScore = Math.max(...scores.map((s) => s.avgHealth));
-  const winners = bestScore > 0 ? scores.filter((s) => s.avgHealth === bestScore) : [];
+  // Shared window for every participant (not per-participant joinedAt) —
+  // a deliberate fixed-cohort decision paired with the join-cutoff above,
+  // so nobody is scored over time they weren't meaningfully present for.
+  const windowStart = existing.startedAt ?? existing.createdAt;
+  const mode = getEnforcementMode();
+  const scoreFn = mode === 'strict' ? getAttestedWindowHealth : getWindowHealth;
 
   await prisma.$transaction(async (tx) => {
-    const guard = await tx.pool.updateMany({
-      where: { id: poolId, status: { in: ['OPEN', 'ACTIVE'] } },
-      data: { status: 'SETTLED' as PoolStatus, settledAt: new Date() },
+    // Atomically claim the SETTLING lock. A concurrent settlePool() call
+    // serializes behind this update on the row and then sees status no
+    // longer IN (OPEN, ACTIVE) — count is 0, so it fails the claim instead
+    // of double-settling.
+    const claim = await tx.pool.updateMany({
+      where: { id: poolId, status: { in: ['OPEN', 'ACTIVE'] as PoolStatus[] } },
+      data: { status: 'SETTLING' as PoolStatus },
     });
-    if (guard.count === 0) {
-      throw new AppError('Pool has already been settled', 409);
+    if (claim.count === 0) {
+      throw new AppError('Pool is already being settled', 409);
     }
 
-    // Re-read the pot total now that we hold the settlement lock, so any
-    // join/leave that raced us in but lost is correctly reflected.
-    const locked = await tx.pool.findUniqueOrThrow({ where: { id: poolId } });
+    const scored = await Promise.all(
+      activeParticipants.map(async (p) => ({
+        participant: p,
+        score: await scoreFn(p.userId, windowStart, existing.endsAt, tx),
+      })),
+    );
 
-    // Persist real, data-derived focus scores for every active participant.
-    for (const s of scores) {
-      await tx.poolParticipant.update({
-        where: { id: s.participantId },
-        data: { focusScore: s.avgHealth },
-      });
-    }
+    const anyData = scored.some((s) => s.score.hasData);
 
-    if (winners.length === 0) {
-      // Nobody had any qualifying activity data during the pool window —
-      // there's no fair basis to declare a winner, so refund everyone.
-      for (const p of activeParticipants) {
+    if (!anyData) {
+      // Nobody cleared the coverage floor — there's no fair basis to
+      // declare a winner, so refund everyone and cancel the pool.
+      for (const s of scored) {
+        await creditTokens(
+          s.participant.userId,
+          s.participant.entryFeePaid,
+          'POOL_REFUND',
+          `Pool "${existing.name}" cancelled — no verifiable screen-time data`,
+          poolId,
+          tx,
+        );
         await tx.poolLedger.create({
           data: {
             poolId,
             type: 'REFUND' as PoolLedgerType,
-            amount: p.entryFeePaid,
-            description: `No verifiable activity data — refunding ${p.userId}`,
+            amount: s.participant.entryFeePaid,
+            description: `Refund to ${s.participant.userId} — no verifiable data`,
           },
         });
-        await creditTokens(
-          p.userId,
-          p.entryFeePaid,
-          'POOL_REFUND',
-          `Pool "${existing.name}" cancelled: no activity data to determine a winner`,
-          poolId,
-          tx,
-        );
+        await tx.poolParticipant.update({ where: { id: s.participant.id }, data: { focusScore: 0 } });
+      }
+
+      const finalize = await tx.pool.updateMany({
+        where: { id: poolId, status: 'SETTLING' as PoolStatus },
+        data: { status: 'CANCELLED' as PoolStatus, settledAt: new Date() },
+      });
+      if (finalize.count === 0) {
+        throw new AppError('Pool settlement conflict', 409);
       }
       return;
     }
 
-    const platformFee = Math.floor(locked.potTotal * PLATFORM_FEE_RATE);
-    const payoutPool = locked.potTotal - platformFee;
-    const share = Math.floor(payoutPool / winners.length);
+    for (const s of scored) {
+      await tx.poolParticipant.update({
+        where: { id: s.participant.id },
+        data: { focusScore: s.score.healthPercent },
+      });
+    }
 
-    await tx.poolLedger.create({
-      data: {
-        poolId,
-        type: 'PLATFORM_FEE' as PoolLedgerType,
-        amount: platformFee,
-        description: `Platform fee (${Math.round(PLATFORM_FEE_RATE * 100)}%)`,
-      },
+    // Highest score wins; tie-break by earliest joinedAt for determinism.
+    const ranked = [...scored].sort((a, b) =>
+      b.score.healthPercent !== a.score.healthPercent
+        ? b.score.healthPercent - a.score.healthPercent
+        : a.participant.joinedAt.getTime() - b.participant.joinedAt.getTime(),
+    );
+    const winner = ranked[0].participant;
+
+    const platformFee = Math.floor(existing.potTotal * PLATFORM_FEE_RATE);
+    const winnerPayout = existing.potTotal - platformFee;
+
+    await tx.poolParticipant.update({
+      where: { id: winner.id },
+      data: { tokensWon: winnerPayout },
     });
 
-    for (const winner of winners) {
-      await tx.poolParticipant.update({
-        where: { id: winner.participantId },
-        data: { tokensWon: share },
-      });
-
-      await tx.poolLedger.create({
-        data: {
+    await tx.poolLedger.createMany({
+      data: [
+        {
+          poolId,
+          type: 'PLATFORM_FEE' as PoolLedgerType,
+          amount: platformFee,
+          description: `Platform fee (${Math.round(PLATFORM_FEE_RATE * 100)}%)`,
+        },
+        {
           poolId,
           type: 'WINNING_PAYOUT' as PoolLedgerType,
-          amount: share,
-          description: `Winner payout to ${winner.userId} (focus score ${winner.avgHealth.toFixed(1)})`,
+          amount: winnerPayout,
+          description: `Winner payout to ${winner.userId}`,
         },
-      });
+      ],
+    });
 
-      await creditTokens(
-        winner.userId,
-        share,
-        'POOL_WIN',
-        `Won pool "${existing.name}" (focus score ${winner.avgHealth.toFixed(1)})`,
-        poolId,
-        tx,
-      );
+    await creditTokens(
+      winner.userId,
+      winnerPayout,
+      'POOL_WIN',
+      `Won pool "${existing.name}" (screen-time health score)`,
+      poolId,
+      tx,
+    );
+
+    const finalize = await tx.pool.updateMany({
+      where: { id: poolId, status: 'SETTLING' as PoolStatus },
+      data: { status: 'SETTLED' as PoolStatus, settledAt: new Date() },
+    });
+    if (finalize.count === 0) {
+      throw new AppError('Pool settlement conflict', 409);
     }
   });
 

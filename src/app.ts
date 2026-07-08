@@ -35,6 +35,9 @@ import screentimeRouter from './modules/screentime/screentime.routes.js';
 // Route modules — devices (push notification tokens)
 import devicesRouter from './modules/devices/devices.routes.js';
 
+// Route modules — attestation (App Attest device integrity)
+import attestationRouter from './modules/attestation/attestation.routes.js';
+
 const app = express();
 
 // Tell Express how many reverse-proxy hops sit in front of it so req.ip and
@@ -44,12 +47,16 @@ const app = express();
 app.set('trust proxy', env.trustProxyHops);
 
 // ─── Stripe webhook (must be BEFORE express.json() for raw body) ─────────────
+// Gated by the same money-surface flag as payments/pools/commitments below —
+// only mounted at all when the surface is live.
 
-app.post(
-  '/api/payments/webhook',
-  express.raw({ type: 'application/json' }),
-  webhookHandler
-);
+if (env.features.paymentsEnabled) {
+  app.post(
+    '/api/payments/webhook',
+    express.raw({ type: 'application/json' }),
+    webhookHandler
+  );
+}
 
 // ─── Global Middleware ──────────────────────────────────────────────────────
 
@@ -60,7 +67,12 @@ app.use(cors({
     : '*',
   credentials: true,
 }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({
+  limit: '1mb',
+  // Capture the exact request bytes before sanitizeInput can mutate req.body,
+  // so attestation assertions can be bound to what the client actually sent.
+  verify: (req, _res, buf) => { (req as express.Request).rawBody = Buffer.from(buf); },
+}));
 // Assign a request id before any other middleware runs so it's available
 // everywhere — including the rate limiter's error path.
 app.use(requestIdMiddleware);
@@ -89,23 +101,39 @@ app.use('/api/friends', friendsRouter);
 // ─── Tokens ───────────────────────────────────────────────────────────────
 app.use('/api/tokens', tokensRouter);
 
-// ─── Payments (Stripe) ────────────────────────────────────────────────────
-app.use('/api/payments', paymentsRouter);
+// ─── Payments (Stripe), Pools, Commitments — real-money surfaces ──────────
+// Gated by POOLS_PAYMENTS_ENABLED for Apple Guideline 5.3 compliance: the
+// app can ship with money features fully off until compliance is resolved,
+// and be flipped on cleanly. Disabled requests get a clear 503 rather than
+// a generic 404.
+const moneyDisabledHandler: express.RequestHandler = (_req, res) => {
+  res.status(503).json({ error: 'This feature is temporarily disabled' });
+};
 
-// ─── Pools ────────────────────────────────────────────────────────────────
-app.use('/api/pools', poolsRouter);
+if (env.features.paymentsEnabled) {
+  app.use('/api/payments', paymentsRouter);
+  app.use('/api/pools', poolsRouter);
+  app.use('/api/commitments', commitmentsRouter);
+} else {
+  app.use('/api/payments', moneyDisabledHandler);
+  app.use('/api/pools', moneyDisabledHandler);
+  app.use('/api/commitments', moneyDisabledHandler);
+}
 
-// ─── Wheel, Power-Ups, Cosmetics, Commitments ─────────────────────────────
+// ─── Wheel, Power-Ups, Cosmetics ───────────────────────────────────────────
 app.use('/api/wheel', wheelRouter);
 app.use('/api/power-ups', powerupsRouter);
 app.use('/api/cosmetics', cosmeticsRouter);
-app.use('/api/commitments', commitmentsRouter);
 
 // ─── Screen Time ──────────────────────────────────────────────────────────
 app.use('/api/screentime', screentimeRouter);
 
 // ─── Devices (push notification tokens) ──────────────────────────────────
 app.use('/api/devices', devicesRouter);
+
+// ─── Attestation (App Attest device integrity) ────────────────────────────
+// Doesn't move money itself, so it isn't behind the payments feature flag.
+app.use('/api/attestation', attestationRouter);
 
 // ─── 404 Handler ───────────────────────────────────────────────────────────
 

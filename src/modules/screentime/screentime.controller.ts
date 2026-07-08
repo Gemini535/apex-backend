@@ -4,9 +4,28 @@ import * as service from './screentime.service.js';
 import type { AppCategory } from '@prisma/client';
 import { assertValidRange } from '../../shared/dateRange.js';
 
+/**
+ * The x-attestation header carries the assertion (keyId + signature) instead
+ * of the JSON body — the assertion is generated over the body's bytes, so it
+ * can't also be embedded inside the very body it's attesting to.
+ */
+function readAttestationHeader(req: Request): { keyId: string; assertion: string } | undefined {
+  const header = req.headers['x-attestation'];
+  if (typeof header !== 'string' || !header) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+    if (typeof parsed?.keyId === 'string' && typeof parsed?.assertion === 'string') {
+      return { keyId: parsed.keyId, assertion: parsed.assertion };
+    }
+    throw new Error('missing keyId/assertion');
+  } catch {
+    throw new AppError('Invalid x-attestation header', 400);
+  }
+}
+
 export async function uploadBatch(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { entries } = req.body as {
+    const { entries, attestationNonce } = req.body as {
       entries: Array<{
         appName: string;
         appBundleId?: string;
@@ -16,6 +35,7 @@ export async function uploadBatch(req: Request, res: Response, next: NextFunctio
         endedAt?: string;
         isBlacklisted?: boolean;
       }>;
+      attestationNonce?: string;
     };
     const parsed = entries.map((e) => ({
       appName: e.appName,
@@ -26,8 +46,27 @@ export async function uploadBatch(req: Request, res: Response, next: NextFunctio
       endedAt: e.endedAt ? new Date(e.endedAt) : undefined,
       isBlacklisted: e.isBlacklisted,
     }));
-    const result = await service.uploadBatch(req.user!.userId, parsed);
-    res.status(201).json({ message: 'Screen time entries uploaded', count: result.count });
+
+    let attestation: service.UploadBatchAttestation | undefined;
+    const headerAttestation = readAttestationHeader(req);
+    if (headerAttestation && attestationNonce) {
+      if (!req.rawBody) {
+        throw new AppError('Raw request body unavailable for attestation binding', 500);
+      }
+      attestation = {
+        keyId: headerAttestation.keyId,
+        assertionB64: headerAttestation.assertion,
+        nonce: attestationNonce,
+        payload: req.rawBody,
+      };
+    }
+
+    const result = await service.uploadBatch(req.user!.userId, parsed, attestation);
+    res.status(201).json({
+      message: 'Screen time entries uploaded',
+      count: result.count,
+      attestationStatus: result.attestationStatus,
+    });
   } catch (error) {
     next(error);
   }

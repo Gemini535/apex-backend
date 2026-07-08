@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { prisma } from '../../config/database.js';
 import type { AppCategory } from '@prisma/client';
 import { clearAllCaches } from '../../shared/cache/index.js';
+import { getUtcDayBoundary } from '../../shared/tz.js';
 import {
   uploadBatch,
   getTodaySummary,
@@ -10,6 +11,8 @@ import {
   getCategoriesBreakdown,
   getActiveSession,
   updateBrainState,
+  getWindowHealth,
+  getAttestedWindowHealth,
 } from './screentime.service.js';
 
 describe('screentime.service', () => {
@@ -263,6 +266,145 @@ describe('screentime.service', () => {
       const first = await updateBrainState(testUserId, new Date());
       const second = await updateBrainState(testUserId, new Date());
       expect(second.totalScreenTime).toBe(first.totalScreenTime);
+    });
+  });
+
+  describe('getWindowHealth / getAttestedWindowHealth (pool settlement coverage floor)', () => {
+    // Fixed historical dates for deterministic day-bucketing regardless of
+    // when the suite runs.
+    const START = new Date('2021-06-01T00:00:00.000Z');
+    const END = new Date('2021-06-04T20:00:00.000Z'); // spans 4 UTC days
+    const D1 = new Date('2021-06-01T10:00:00.000Z');
+    const D2 = new Date('2021-06-02T10:00:00.000Z');
+    const D3 = new Date('2021-06-03T10:00:00.000Z');
+    const D4 = new Date('2021-06-04T10:00:00.000Z');
+
+    it('a single report on 1 of 4 days does not clear the coverage floor', async () => {
+      await prisma.screenTimeEntry.create({
+        data: { userId: testUserId, appName: 'App', category: 'PRODUCTIVITY', duration: 60, startedAt: D1 },
+      });
+
+      const result = await getWindowHealth(testUserId, START, END);
+      expect(result.hasData).toBe(false);
+      expect(result.coveredDays).toBe(1);
+      expect(result.windowDays).toBe(4);
+    });
+
+    it('light usage reported every day still scores well (not penalized for low volume)', async () => {
+      for (const day of [D1, D2, D3, D4]) {
+        await prisma.screenTimeEntry.create({
+          data: { userId: testUserId, appName: 'App', category: 'PRODUCTIVITY', duration: 60, startedAt: day },
+        });
+      }
+
+      const result = await getWindowHealth(testUserId, START, END);
+      expect(result.hasData).toBe(true);
+      expect(result.coveredDays).toBe(4);
+      expect(result.healthPercent).toBe(100); // 60s of pure focus time each day
+    });
+
+    it('a day with no report at all contributes 0 to the average, even inside an otherwise-covered window', async () => {
+      // Covered on 3 of 4 days (>= 0.5 ratio), day D2 has nothing.
+      for (const day of [D1, D3, D4]) {
+        await prisma.screenTimeEntry.create({
+          data: { userId: testUserId, appName: 'App', category: 'PRODUCTIVITY', duration: 60, startedAt: day },
+        });
+      }
+
+      const result = await getWindowHealth(testUserId, START, END);
+      expect(result.hasData).toBe(true);
+      expect(result.coveredDays).toBe(3);
+      // 3 covered days score 100 each, 1 uncovered day scores 0: (100*3+0)/4 = 75.
+      expect(result.healthPercent).toBe(75);
+    });
+
+    it('getAttestedWindowHealth ignores UNATTESTED and FAILED entries entirely', async () => {
+      await prisma.screenTimeEntry.create({
+        data: { userId: testUserId, appName: 'App', category: 'PRODUCTIVITY', duration: 3600, startedAt: D1, attestationStatus: 'UNATTESTED' },
+      });
+      await prisma.screenTimeEntry.create({
+        data: { userId: testUserId, appName: 'App', category: 'PRODUCTIVITY', duration: 3600, startedAt: D2, attestationStatus: 'FAILED' },
+      });
+
+      const result = await getAttestedWindowHealth(testUserId, START, END);
+      expect(result.hasData).toBe(false);
+      expect(result.coveredDays).toBe(0);
+    });
+
+    it('getAttestedWindowHealth counts an attested zero-entry check-in as covered', async () => {
+      const device = await prisma.attestedDevice.create({
+        data: { userId: testUserId, keyId: `key-${testUserId}`, publicKeyPem: 'test', attestationStatus: 'VERIFIED' },
+      });
+      // Two attested check-ins with zero screen-time entries (quiet days),
+      // and two days of real VERIFIED usage — all 4 days covered.
+      await prisma.attestationVerification.create({
+        data: { userId: testUserId, attestedDeviceId: device.id, signCount: 1, verifiedAt: D2, entryCount: 0 },
+      });
+      await prisma.attestationVerification.create({
+        data: { userId: testUserId, attestedDeviceId: device.id, signCount: 2, verifiedAt: D3, entryCount: 0 },
+      });
+      const v1 = await prisma.attestationVerification.create({
+        data: { userId: testUserId, attestedDeviceId: device.id, signCount: 3, verifiedAt: D1, entryCount: 1 },
+      });
+      await prisma.screenTimeEntry.create({
+        data: {
+          userId: testUserId, appName: 'App', category: 'PRODUCTIVITY', duration: 60, startedAt: D1,
+          attestationStatus: 'VERIFIED', attestationVerificationId: v1.id,
+        },
+      });
+      const v4 = await prisma.attestationVerification.create({
+        data: { userId: testUserId, attestedDeviceId: device.id, signCount: 4, verifiedAt: D4, entryCount: 1 },
+      });
+      await prisma.screenTimeEntry.create({
+        data: {
+          userId: testUserId, appName: 'App', category: 'PRODUCTIVITY', duration: 60, startedAt: D4,
+          attestationStatus: 'VERIFIED', attestationVerificationId: v4.id,
+        },
+      });
+
+      const result = await getAttestedWindowHealth(testUserId, START, END);
+      expect(result.hasData).toBe(true);
+      expect(result.coveredDays).toBe(4);
+      // Quiet checked-in days score calculateHealth(0,0)=70, usage days score 100:
+      // (100 + 70 + 70 + 100) / 4 = 85.
+      expect(result.healthPercent).toBe(85);
+    });
+
+    it('buckets by the user\'s local day, not UTC, for a non-UTC timezone', async () => {
+      const tz = 'Pacific/Kiritimati'; // UTC+14 — furthest-ahead real timezone
+      const nonUtcUser = await prisma.user.create({
+        data: {
+          email: `st-tz-${Date.now()}@test.app`,
+          username: `st-tz-${Date.now()}`,
+          passwordHash: 'fake',
+          timezone: tz,
+        },
+      });
+      try {
+        // A window that is exactly one local calendar day in `tz`. In UTC
+        // this spans parts of two different UTC calendar days (UTC+14 pushes
+        // local midnight back by 14 hours) — so a naive UTC-day bucketing
+        // would disagree with correct local-day bucketing on which entries
+        // fall inside it. 2021-06-02T12:00:00Z is 2021-06-03T02:00 local, so
+        // this window covers local day 2021-06-03.
+        const { dayStart, dayEnd } = getUtcDayBoundary(tz, new Date('2021-06-02T12:00:00.000Z'));
+
+        // This entry's UTC instant falls on UTC calendar day 2021-06-02, but
+        // its *local* day in `tz` is 2021-06-03 — matching the window above.
+        const crossesUtcMidnight = new Date('2021-06-02T20:00:00.000Z');
+        expect(crossesUtcMidnight.toISOString().slice(0, 10)).toBe('2021-06-02'); // naive UTC day would be wrong
+        await prisma.screenTimeEntry.create({
+          data: { userId: nonUtcUser.id, appName: 'App', category: 'PRODUCTIVITY', duration: 60, startedAt: crossesUtcMidnight },
+        });
+
+        const result = await getWindowHealth(nonUtcUser.id, dayStart, dayEnd);
+        expect(result.windowDays).toBe(1);
+        expect(result.coveredDays).toBe(1); // correctly recognized as covering this local day
+        expect(result.hasData).toBe(true);
+      } finally {
+        await prisma.screenTimeEntry.deleteMany({ where: { userId: nonUtcUser.id } });
+        await prisma.user.delete({ where: { id: nonUtcUser.id } }).catch(() => {});
+      }
     });
   });
 });
